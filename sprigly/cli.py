@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -94,6 +95,34 @@ def status(cfg: dict) -> None:
     conn.close()
 
 
+def _choose(menu: list, cfg: dict) -> int:
+    """Fuzzy-pick from the menu, falling back to a numbered table.
+
+    fzf needs a terminal on both ends, so a piped or redirected stdin — a script, a test — has to
+    keep working rather than blowing up inside the subprocess.
+    """
+    lines = [f"{i:>2}  {o.kind:<6} {o.candidate.domain:<15} {o.candidate.est_minutes:>3}m "
+             f"{o.score:.2f}  {o.candidate.topic}   [{_why(o, cfg)}]"
+             for i, o in enumerate(menu, 1)]
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        from iterfzf import iterfzf
+
+        picked = iterfzf(lines, prompt="pick> ", exact=False,
+                         header="enter to take one, esc to skip all")
+        return int(picked.split()[0]) if picked else 0
+
+    from rich.console import Console
+    from rich.table import Table
+
+    table = Table("#", "kind", "topic", "domain", "min", "score", "why")
+    for i, o in enumerate(menu, 1):
+        table.add_row(str(i), o.kind, o.candidate.topic, o.candidate.domain,
+                      str(o.candidate.est_minutes), f"{o.score:.2f}", _why(o, cfg))
+    Console().print(table)
+    return click.prompt("pick", type=click.IntRange(0, len(menu)), default=0,
+                        show_default=False, prompt_suffix=" (0 to skip all): ")
+
+
 def _why(offer, cfg: dict) -> str:
     """The two signals contributing most to this score. The full breakdown is in the event log."""
     from . import picker
@@ -125,18 +154,11 @@ def next(cfg: dict, budget: int | None) -> None:
         conn.close()
         return
 
-    table = Table("#", "kind", "topic", "domain", "min", "score", "why")
-    for i, o in enumerate(menu, 1):
-        table.add_row(str(i), o.kind, o.candidate.topic, o.candidate.domain,
-                      str(o.candidate.est_minutes), f"{o.score:.2f}", _why(o, cfg))
-    Console().print(table)
-
     for o in menu:
         store.log_event(conn, "offered", o.candidate.id,
                         _json.dumps({"kind": o.kind, "score": o.score, "signals": o.signals}))
 
-    choice = click.prompt("pick", type=click.IntRange(0, len(menu)), default=0,
-                          show_default=False, prompt_suffix=" (0 to skip all): ")
+    choice = _choose(menu, cfg)
     if choice:
         taken = menu[choice - 1]
         store.log_event(conn, "picked", taken.candidate.id, _json.dumps({"kind": taken.kind}))

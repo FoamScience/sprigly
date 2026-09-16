@@ -175,8 +175,9 @@ any exist. MEMORIZE shows the optimal schedule is a review *intensity* proportio
 probability — a rate, not a binary due flag — which is what justifies sizing a lane. As one signal
 among six, a due card can be outvoted indefinitely, and fsrs degrades when reviews run late.
 
-`sprigly next` prints the k candidates with their signal breakdowns, logs all k as offered and the
-taken one as picked. **The skips are half the training data.**
+`sprigly next` offers the k candidates through a fuzzy picker, logs all k as offered and the taken
+one as picked. **The skips are half the training data.** Without a terminal on both ends — a script,
+a test — it falls back to a numbered table and a prompt rather than failing inside the subprocess.
 
 **Layer 4 — fitting.** Each `next` is one pick out of k with full feature vectors, which is a
 top-1-of-k choice; its exact likelihood is the conditional logit (McFadden), equivalently
@@ -385,6 +386,7 @@ One TOML file. Everything below is a knob, and none of it is a code change:
 | URL to clean text | `trafilatura` |
 | Video sources | `yt-dlp`, only if the bridge cannot take a URL directly |
 | CLI / output / HTTP | `click`, `rich`, `httpx` — already transitive deps of `notebooklm-py` |
+| Fuzzy picking | `iterfzf` — ships the `fzf` binary in the wheel, so nothing to install separately |
 | Store | stdlib `sqlite3` |
 | Scheduling, locking, backup, logging, paths | stdlib and systemd |
 | Phone delivery | Syncthing (external, no code) |

@@ -98,7 +98,7 @@ generate an audio overview and a slide deck, download both — and record:
 ## Development
 
 ```bash
-uv sync                        # install dependencies
+uv sync                        # install dependencies (includes a bundled fzf binary)
 uv run sprigly config          # resolved configuration and paths
 uv run python sprigly/config.py  # module self-check
 ```
