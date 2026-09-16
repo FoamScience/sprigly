@@ -147,8 +147,10 @@ async def _fill(c, nb, topic, paths, urls, instructions, language, depth, cfg, s
 
 def start(topic: str, source_paths: list[str], cfg: dict, language: str = "en",
           instructions: str | None = None, urls: list[str] | None = None,
-          depth: int = 3, report=None) -> dict[str, Any]:
+          depth: int = 3, report=None, artifacts: list[str] | None = None) -> dict[str, Any]:
     """Create a notebook, upload the sources, request generation. Returns a job reference."""
+    if artifacts:
+        cfg = {**cfg, "bridge": {**cfg["bridge"], "artifacts": artifacts}}
     return asyncio.run(
         _start(topic, source_paths, urls or [], instructions, language, depth, cfg, report))
 

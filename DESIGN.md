@@ -391,9 +391,15 @@ suggests an fsrs rating (wrong → Again, right after a retry → Hard, right fi
 the final say is yours, including Easy. Grades go to `fsrs`, which returns the next due date.
 Flashcards export to Anki if wanted.
 
-When a lesson comes due, **the original material is presented again**. `--freshen` re-harvests with
-the original sources as the baseline plus up to `freshen_new_sources` (default 3) recent additions,
-and regenerates the audio only — not the video or slides, which are the expensive parts.
+When a lesson comes due, **the original material is presented again**. `sprigly redo <id> --from
+freshen` re-harvests with the original sources kept as the baseline plus up to
+`freshen_new_sources` (default 3) recent additions, and regenerates **the audio only** — the video
+and slides are the expensive parts and nothing about them has changed.
+
+Keeping the originals is the point: a refresher that replaced its sources would be a different
+lesson wearing the same name. The harvester is told what the lesson already has and searches for
+what is new, most recent first; `lesson.artifacts` carries the one-run restriction so the rest of
+the pipeline needs no special case.
 
 ## Focus mode and the depth knob
 

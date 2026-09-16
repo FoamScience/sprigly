@@ -378,7 +378,8 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
 
 @main.command()
 @click.argument("lesson_id", type=int)
-@click.option("--from", "stage", type=click.Choice(["harvest", "upload"]), default="harvest",
+@click.option("--from", "stage", type=click.Choice(["harvest", "upload", "freshen"]),
+              default="harvest",
               show_default=True, help="Which phase to run again.")
 @click.option("--lang", help="Regenerate in this language, e.g. de.")
 @click.pass_obj

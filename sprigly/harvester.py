@@ -181,16 +181,28 @@ def brief(topic: str, depth: int, kept: list[Work], admission: gate.Admission, c
     return "\n".join(lines) + "\n"
 
 
-def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None,
-           report=None) -> list[dict[str, Any]]:
-    """Search, gate, rank, fetch. Returns source records for the store."""
+def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None, report=None,
+           exclude: set[str] | None = None, want: int | None = None) -> list[dict[str, Any]]:
+    """Search, gate, rank, fetch. Returns source records for the store.
+
+    `exclude` and `want` are what freshening needs: skip what the lesson already has, and stop
+    after a few genuinely new ones. The originals stay the baseline — a refresher that replaced its
+    sources would be a different lesson wearing the same name.
+    """
     say = report or (lambda _msg: None)
+    exclude = {u.lower() for u in (exclude or set())}
     budget = cfg["depth"][str(depth)]["sources"]
     found = sources.search(topic, limit=budget * 3, cfg=cfg, report=report)
     log.info("harvest %r: %d candidates", topic, len(found))
     say(f"{len(found)} candidates")
 
     say("ranking for relevance")
+    if exclude:
+        before = len(found)
+        found = [w for w in found if w.key not in exclude and w.url.lower() not in exclude]
+        say(f"{before - len(found)} already known, {len(found)} new")
+        found.sort(key=lambda w: -(w.year or 0))
+
     relevant, off_topic = rank_relevance(topic, depth, found, cfg, runner, report)
     admission = gate.admit(relevant, depth, cfg)
     for w, why in off_topic:
@@ -201,6 +213,9 @@ def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None,
         f"{len(admission.accepted)} admitted ({admission.evidence or 'unknown'})")
     for note in admission.notes:
         say(note)
+
+    accepted = admission.accepted[:want] if want else admission.accepted
+    admission.accepted = accepted
 
     # Fetches are independent and dominated by waiting, so they run together. Order is preserved
     # by collecting results per index rather than as they finish.

@@ -79,7 +79,16 @@ def _do_picked(conn, row, cfg, report=None) -> str:
 
 def _do_harvesting(conn, row, cfg, report=None) -> str:
     dest = _lesson_dir(cfg, row["id"]) / "sources"
-    found = harvester.gather(row["topic"], row["depth"], dest, cfg, report=report)
+    # A lesson that already has sources is being freshened, not harvested from scratch: keep them
+    # as the baseline and look only for a few recent additions.
+    known = {r[0].lower() for r in conn.execute(
+        "SELECT s.url FROM source s JOIN lesson_source ls ON ls.source_id=s.id"
+        " WHERE ls.lesson_id=?", (row["id"],))}
+    want = cfg["delivery"]["freshen_new_sources"] if known else None
+    if known and report:
+        report(f"freshening: {len(known)} sources kept, looking for {want} more")
+    found = harvester.gather(row["topic"], row["depth"], dest, cfg, report=report,
+                             exclude=known, want=want)
     for s in found:
         conn.execute(
             "INSERT OR IGNORE INTO source (url, doi, title, venue, year, work_type, tier,"
@@ -91,12 +100,13 @@ def _do_harvesting(conn, row, cfg, report=None) -> str:
         sid = conn.execute("SELECT id FROM source WHERE url=?", (s["url"],)).fetchone()[0]
         conn.execute("INSERT OR IGNORE INTO lesson_source VALUES (?,?)", (row["id"], sid))
 
+    total = len(known) + len(found)
     budget = cfg["depth"][str(row["depth"])]["sources"]
-    if len(found) < cfg["sources"]["min_sources"]:
+    if total < cfg["sources"]["min_sources"]:
         _set(conn, row["id"], state="unsourced")
-        store.log_event(conn, "unsourced", row["id"], json.dumps({"found": len(found)}))
+        store.log_event(conn, "unsourced", row["id"], json.dumps({"found": total}))
         return "unsourced"
-    thin = int(len(found) < budget * cfg["sources"]["thin_ratio"])
+    thin = int(total < budget * cfg["sources"]["thin_ratio"])
     _set(conn, row["id"], state="uploading", thin=thin)
     return "uploading"
 
@@ -112,9 +122,10 @@ def _do_uploading(conn, row, cfg, report=None) -> str:
     # is also why Tier C video needs no separate downloader.
     urls = [r["url"] for r in rows if not r["local_path"]]
     note = _lesson_dir(cfg, row["id"]) / "brief.md"
+    wanted = json.loads(row["artifacts"]) if row["artifacts"] else None
     job = bridge.start(row["topic"], paths, cfg, language=row["language"],
                        instructions=note.read_text() if note.exists() else None,
-                       urls=urls, depth=row["depth"], report=report)
+                       urls=urls, depth=row["depth"], report=report, artifacts=wanted)
     _set(conn, row["id"], state="generating", job_ref=json.dumps(job),
          notebook_id=job.get("notebook_id"), polled_at=utcnow())
     store.log_event(conn, "generated", row["id"], json.dumps(job))
@@ -177,6 +188,7 @@ REDO_STAGES = {
     # stage -> (state to return to, what gets thrown away)
     "harvest": ("picked", "sources, brief and any notebook"),
     "upload": ("uploading", "the notebook and any artifacts"),
+    "freshen": ("picked", "the notebook and the audio, keeping every source as a baseline"),
 }
 
 
@@ -211,8 +223,11 @@ def redo(conn, cfg, lesson_id: int, stage: str) -> str:
         shutil.rmtree(lesson_dir / "sources", ignore_errors=True)
         (lesson_dir / "brief.md").unlink(missing_ok=True)
 
+    # Freshening regenerates the audio alone. The video and slides are the expensive parts and
+    # nothing about them has changed; the sources stay as the baseline the refresher builds on.
+    artifacts = json.dumps(["audio"]) if stage == "freshen" else None
     _set(conn, lesson_id, state=state, job_ref=None, notebook_id=None, polled_at=None,
-         retry_count=0, last_error=None, next_attempt_at=None, thin=0)
+         retry_count=0, last_error=None, next_attempt_at=None, thin=0, artifacts=artifacts)
     store.log_event(conn, "redo", lesson_id, json.dumps({"stage": stage, "from": row["state"]}))
     return state
 
@@ -292,14 +307,17 @@ def _selfcheck() -> None:
         conn = store.connect(cfg["paths"]["db"])
 
         # The real harvester searches the internet; this check stays offline.
-        def fake_gather(topic, depth, dest, cfg, runner=None, report=None):
+        def fake_gather(topic, depth, dest, cfg, runner=None, report=None,
+                        exclude=None, want=None):
             dest.mkdir(parents=True, exist_ok=True)
             if report:  # the real harvester narrates each source; prove the wiring carries it
                 report(f"searching for {topic}")
+            n = want if want is not None else cfg["depth"][str(depth)]["sources"]
+            offset = len(exclude or ())
             return [{"url": f"https://example.org/{topic.replace(' ', '-')}/{i}",
                      "title": f"source {i}", "tier": "A", "evidence_level": "peer-reviewed",
                      "local_path": str(dest / f"source-{i}.txt")}
-                    for i in range(cfg["depth"][str(depth)]["sources"])]
+                    for i in range(offset, offset + n)]
 
         real_gather, harvester.gather = harvester.gather, fake_gather
 
@@ -416,7 +434,7 @@ def _selfcheck() -> None:
 
         # Thin flag when the gate yields under the ratio, but still enough to generate.
         saved, harvester.gather = harvester.gather, \
-            lambda t, d, dest, c, **k: saved(t, d, dest, c)[:3]
+            lambda t, d, dest, c, **k: saved(t, d, dest, c, **k)[:3]
         try:
             l8 = add("sparse topic")
             run(conn, cfg)
@@ -447,6 +465,20 @@ def _selfcheck() -> None:
             assert any(ev == "failed" and "nope" in d for ev, _, d in seen_steps)
         finally:
             harvester.gather = saved2
+
+        # Freshening keeps every source and asks only for a few recent additions.
+        fresh = add("freshenable", state="ready")
+        conn.execute("INSERT INTO lesson_source VALUES (?,?)",
+                     (fresh, conn.execute("SELECT id FROM source LIMIT 1").fetchone()[0]))
+        assert redo(conn, cfg, fresh, "freshen") == "picked"
+        assert json.loads(conn.execute("SELECT artifacts FROM lesson WHERE id=?",
+                                       (fresh,)).fetchone()[0]) == ["audio"], \
+            "a refresher regenerates the audio alone"
+        run(conn, cfg, only=fresh)
+        kept = conn.execute("SELECT count(*) FROM lesson_source WHERE lesson_id=?",
+                            (fresh,)).fetchone()[0]
+        assert kept == 1 + cfg["delivery"]["freshen_new_sources"], \
+            f"the originals stay as the baseline and a few join them, got {kept}"
 
         # A redo rewinds a lesson and clears what the phase produced, so it is not counted twice.
         done = add("finished", state="ready")

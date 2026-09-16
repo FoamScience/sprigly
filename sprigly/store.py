@@ -143,6 +143,12 @@ MIGRATIONS: list[tuple[int, str]] = [
     CREATE INDEX event_kind_idx ON event(kind, created_at);
     CREATE INDEX event_lesson_idx ON event(lesson_id);
     """),
+    (2, """
+    -- Which artifacts this lesson should get, as a JSON list, overriding the configured set.
+    -- A freshened lesson regenerates its audio only: the video and slides are the expensive parts
+    -- and nothing about them has changed.
+    ALTER TABLE lesson ADD COLUMN artifacts TEXT;
+    """),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
