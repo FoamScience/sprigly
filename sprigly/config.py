@@ -80,6 +80,9 @@ DEFAULTS: dict[str, Any] = {
         "snap_cutoff": 0.92,
     },
     "sources": {
+        # Identifies you to OpenAlex and Crossref for their faster "polite pool". Left empty
+        # because sending your address to a third party should be a deliberate choice.
+        "mailto": "",
         "open_access_only": True,
         "allowed_types": ["article", "review", "book-chapter", "preprint", "report", "dissertation"],
         "institutional_suffixes": [".edu", ".gov", ".ac.uk", ".ac.jp"],
