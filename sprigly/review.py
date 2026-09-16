@@ -51,14 +51,39 @@ def extract_cards(data) -> list[dict]:
         front = _text(next((item[k] for k in ("question", "front", "prompt", "term")
                             if item.get(k)), None))
         back = _text(next((item[k] for k in ("answer", "back", "response", "definition",
-                                             "explanation") if item.get(k)), None))
+                                             "explanation", "bestAnswer") if item.get(k)), None))
         options = [_text(o) for o in item.get("options") or item.get("choices") or []
                    if _text(o)]
-        if not back and options and item.get("correct_answer") is not None:
+        if not back and item.get("correct_answer") is not None:
             back = _text(item["correct_answer"])
+        if not back:
+            back = _answer_from_options(item)
+        grading = item.get("grading")
+        if not back and isinstance(grading, dict):
+            back = _text(grading.get("modelAnswer") or grading.get("answer"))
+        if not back and item.get("acceptableAnswers"):
+            back = "; ".join(_text(a) for a in item["acceptableAnswers"] if _text(a))
+        if not back:
+            back = _text(item.get("rationale"))
         if front and back:
             out.append({"front": front, "back": back, "options": options})
     return out
+
+
+def _answer_from_options(item: dict) -> str:
+    """Build the answer from a multiple-choice option list.
+
+    The real export carries `answerOptions` as objects with `isCorrect` and a `rationale`, which no
+    amount of guessing at key names would have found — it took a generated quiz to see it. Multiple
+    options can be correct (`multiple_select`), so every correct one is kept.
+    """
+    correct = [o for o in item.get("answerOptions") or []
+               if isinstance(o, dict) and o.get("isCorrect")]
+    if not correct:
+        return ""
+    answer = " / ".join(_text(o.get("text")) for o in correct if _text(o.get("text")))
+    reasons = [_text(o.get("rationale")) for o in correct if _text(o.get("rationale"))]
+    return f"{answer}\n\n{reasons[0]}" if answer and reasons else answer
 
 
 def front_hash(front: str) -> str:
@@ -148,6 +173,36 @@ def _selfcheck() -> None:
         assert len(got) == 1, shape
         assert got[0]["front"] == "what is a stencil?"
         assert got[0]["back"] == "a local set of nodes"
+
+    # The real export, which no guess at key names would have produced.
+    real = {"title": "Cognitive Quiz", "questions": [
+        {"type": "multiple_choice", "question": "why are worked examples more efficient?",
+         "answerOptions": [
+             {"text": "they remove means-ends analysis", "isCorrect": True,
+              "rationale": "it frees working memory"},
+             {"text": "they are shorter", "isCorrect": False, "rationale": "length is not the point"}],
+         "hint": "think about working memory"},
+        {"type": "multiple_select", "question": "which reduce extraneous load?",
+         "answerOptions": [
+             {"text": "worked examples", "isCorrect": True},
+             {"text": "split attention", "isCorrect": False},
+             {"text": "signalling", "isCorrect": True}]},
+        {"type": "short_answer", "question": "what is germane load?",
+         "acceptableAnswers": ["effort that builds schemas"]},
+        {"type": "short_answer", "question": "what is expert blindness?",
+         "grading": {"modelAnswer": "experts cannot see what confuses a novice"}},
+        {"type": "fill_in_the_blank", "question": "load is ___ when materials are split",
+         "bestAnswer": "extraneous"},
+    ]}
+    cards = extract_cards(real)
+    assert len(cards) == 5, f"every question type must yield a card, got {len(cards)}"
+    assert cards[0]["back"].startswith("they remove means-ends analysis")
+    assert "frees working memory" in cards[0]["back"], "the rationale is the explanation"
+    assert cards[1]["back"] == "worked examples / signalling", "multiple_select keeps every answer"
+    assert cards[2]["back"] == "effort that builds schemas"
+    assert cards[3]["back"] == "experts cannot see what confuses a novice", \
+        "short answers sometimes carry the answer under grading.modelAnswer"
+    assert cards[4]["back"] == "extraneous"
 
     assert extract_cards({"questions": [{"question": "no answer here"}]}) == [], \
         "half a pair is not a card"
