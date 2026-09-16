@@ -92,3 +92,58 @@ def status(cfg: dict) -> None:
     due, nxt = store.due_cards(conn)
     console.print(f"cards due now: {due}" + (f" · next due {nxt}" if nxt else ""))
     conn.close()
+
+
+def _why(offer, cfg: dict) -> str:
+    """The two signals contributing most to this score. The full breakdown is in the event log."""
+    from . import picker
+
+    w = cfg["scoring"]
+    ranked = sorted(picker.SIGNALS, key=lambda s: -w[s] * offer.signals[s])[:2]
+    return " ".join(f"{s.replace('_', '-')} {offer.signals[s]:.2f}" for s in ranked)
+
+
+@main.command()
+@click.option("--budget", type=int, help="Minutes available today.")
+@click.pass_obj
+def next(cfg: dict, budget: int | None) -> None:
+    """Offer the next lessons and record which one you take."""
+    import json as _json
+
+    from rich.console import Console
+    from rich.table import Table
+
+    from . import picker, snapshot, store
+
+    conn = store.connect(cfg["paths"]["db"])
+    snap = snapshot.load(conn, cfg)
+    if budget:
+        snap.budget_minutes = budget
+    menu = picker.offer(snapshot.candidates(conn), snapshot.due_reviews(conn), snap, cfg)
+    if not menu:
+        click.echo("nothing to offer — run the curator, or check `sprigly status`")
+        conn.close()
+        return
+
+    table = Table("#", "kind", "topic", "domain", "min", "score", "why")
+    for i, o in enumerate(menu, 1):
+        table.add_row(str(i), o.kind, o.candidate.topic, o.candidate.domain,
+                      str(o.candidate.est_minutes), f"{o.score:.2f}", _why(o, cfg))
+    Console().print(table)
+
+    for o in menu:
+        store.log_event(conn, "offered", o.candidate.id,
+                        _json.dumps({"kind": o.kind, "score": o.score, "signals": o.signals}))
+
+    choice = click.prompt("pick", type=click.IntRange(0, len(menu)), default=0,
+                          show_default=False, prompt_suffix=" (0 to skip all): ")
+    if choice:
+        taken = menu[choice - 1]
+        store.log_event(conn, "picked", taken.candidate.id, _json.dumps({"kind": taken.kind}))
+        if taken.kind == "new":
+            conn.execute("UPDATE lesson SET state='picked', score=?, updated_at=? WHERE id=?",
+                         (taken.score, store.utcnow(), taken.candidate.id))
+            click.echo(f"picked {taken.candidate.id}: {taken.candidate.topic} — run `sprigly tick`")
+        else:
+            click.echo(f"review {taken.candidate.id}: {taken.candidate.topic}")
+    conn.close()

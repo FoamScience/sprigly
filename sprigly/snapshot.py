@@ -12,6 +12,20 @@ from dataclasses import dataclass, field
 from .store import utcnow
 
 
+@dataclass(frozen=True)
+class Candidate:
+    """A lesson the picker may offer. Everything scoring is allowed to see about it."""
+
+    id: int
+    topic: str
+    domain: str
+    tags: frozenset[str] = frozenset()
+    prereqs: frozenset[str] = frozenset()
+    est_minutes: int = 20
+    track_id: int | None = None
+    evidence_level: str | None = None
+
+
 @dataclass
 class Snapshot:
     now: str
@@ -24,6 +38,10 @@ class Snapshot:
     budget_minutes: int = 20
     focus_track_ids: set[int] = field(default_factory=set)
     focus_exclusive: bool = False
+    # Change in quiz success rate per domain. Empty until the feedback loop exists; a signal that
+    # is constant across the pool contributes nothing, so an empty dict is a safe default.
+    progress: dict[str, float] = field(default_factory=dict)
+    min_evidence: dict[int, str] = field(default_factory=dict)
 
 
 # A tag counts as mastered while at least one card carrying it is still not overdue. Decay comes
@@ -66,9 +84,44 @@ def load(conn: sqlite3.Connection, cfg: dict, now: str | None = None) -> Snapsho
         offers={r["k"]: r["n"] for r in conn.execute(BY_DOMAIN, ("offered",))},
         picks={r["k"]: r["n"] for r in conn.execute(BY_DOMAIN, ("picked",))},
         budget_minutes=cfg["lesson"]["budget_minutes"],
+        min_evidence={r["id"]: r["min_evidence"] for r in
+                      conn.execute("SELECT id, min_evidence FROM track")},
         focus_track_ids={r["id"] for r in tracks},
         focus_exclusive=any(r["exclusive"] for r in tracks),
     )
+
+
+CANDIDATE_COLS = """
+SELECT l.id, l.topic, COALESCE(l.domain,'') AS domain, l.est_minutes, l.track_id,
+       (SELECT group_concat(tag) FROM lesson_tag WHERE lesson_id=l.id AND kind='tag')  AS tags,
+       (SELECT group_concat(tag) FROM lesson_tag WHERE lesson_id=l.id AND kind='prereq') AS prereqs,
+       (SELECT s.evidence_level FROM source s JOIN lesson_source ls ON ls.source_id=s.id
+        WHERE ls.lesson_id=l.id ORDER BY s.tier LIMIT 1) AS evidence_level
+FROM lesson l
+"""
+
+
+def _to_candidate(r: sqlite3.Row) -> Candidate:
+    return Candidate(
+        id=r["id"], topic=r["topic"], domain=r["domain"],
+        tags=frozenset((r["tags"] or "").split(",")) - {""},
+        prereqs=frozenset((r["prereqs"] or "").split(",")) - {""},
+        est_minutes=r["est_minutes"] or 20,
+        track_id=r["track_id"], evidence_level=r["evidence_level"],
+    )
+
+
+def candidates(conn: sqlite3.Connection) -> list[Candidate]:
+    """Lessons awaiting a pick."""
+    return [_to_candidate(r) for r in conn.execute(CANDIDATE_COLS + " WHERE l.state='proposed'")]
+
+
+def due_reviews(conn: sqlite3.Connection, now: str | None = None) -> list[Candidate]:
+    """Lessons already learned whose cards have come due. A separate pool, not a candidate."""
+    now = now or utcnow()
+    return [_to_candidate(r) for r in conn.execute(
+        CANDIDATE_COLS + " WHERE l.state='reviewed' AND EXISTS ("
+        " SELECT 1 FROM card c WHERE c.lesson_id=l.id AND c.due IS NOT NULL AND c.due<=?)", (now,))]
 
 
 def _selfcheck() -> None:
