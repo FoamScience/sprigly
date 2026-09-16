@@ -281,14 +281,20 @@ def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
                       f" [dim]via {backend} {model}[/dim]")
 
         started = time.monotonic()
-        status = console.status("[dim]waiting on the agent[/dim]", spinner="dots")
+        opening = f"decomposing {goal['goal']}" if goal else "exploring topics"
+        status = console.status(f"[dim]{opening}[/dim]", spinner="dots")
+
+        def say(msg: str) -> None:
+            console.print(f"   [dim]{msg}[/dim]")
+            status.update(f"[cyan]{msg[:70]}[/cyan]")
+
         status.start()
         try:
             ids = curator.propose(
                 conn, cfg, track, n,
                 on_retry=lambda attempt, err: status.update(
                     f"[yellow]retry {attempt}[/yellow] [dim]{err[:60]}[/dim]"),
-                report=lambda msg: console.print(f"   [dim]{msg}[/dim]"))
+                report=say)
         except curator.CuratorError as err:
             raise click.ClickException(str(err))
         finally:

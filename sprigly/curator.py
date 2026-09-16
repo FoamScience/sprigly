@@ -89,6 +89,53 @@ def _event(backend: str, ev: dict) -> tuple[str, str | None]:
     return "", None
 
 
+def _complete_objects(text: str) -> list[str]:
+    """Top-level JSON objects finished so far inside a streaming array.
+
+    Watching an agent stream raw characters says little. Watching the objects land as it writes
+    them says exactly what it is proposing, one lesson at a time.
+    """
+    out, depth, start, in_str, esc = [], 0, None, False, False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and start is not None:
+                out.append(text[start:i + 1])
+                start = None
+    return out
+
+
+def _describe(blob: str) -> str | None:
+    """One streamed object, rendered as a line worth showing."""
+    try:
+        obj = json.loads(blob)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("topic"):
+        domain = obj.get("domain")
+        return f"proposing {obj['topic']}" + (f" [{domain}]" if domain else "")
+    if isinstance(obj.get("n"), int):
+        why = str(obj.get("why") or "").strip()
+        return f"keeping #{obj['n']}" + (f": {why[:56]}" if why else "")
+    return None
+
+
 def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
     """Shell out to whichever agent CLI is configured. No SDK; the prompt is the product.
 
@@ -113,7 +160,7 @@ def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
 
     report(f"asking {backend} {model}")
     deadline = time.monotonic() + a["timeout_seconds"]
-    collected, shown = [], 0
+    collected, shown, described = [], 0, 0
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             bufsize=1)
     try:
@@ -131,11 +178,18 @@ def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
             text, note = _event(backend, ev)
             if text:
                 collected.append(text)
-                total = sum(len(t) for t in collected)
-                # A preview every few hundred characters: enough to see it working, not a firehose.
-                if total - shown >= 400:
-                    shown = total
-                    report(f"{total} chars: {text.strip()[-70:]}")
+                joined = "".join(collected)
+                objects = _complete_objects(joined)
+                if len(objects) > described:
+                    for blob in objects[described:]:
+                        line = _describe(blob)
+                        if line:
+                            report(line)
+                    described = len(objects)
+                elif len(joined) - shown >= 600:
+                    # Nothing structured yet — fall back to showing that characters are arriving.
+                    shown = len(joined)
+                    report(f"{len(joined)} chars so far")
             if note:
                 report(note)
         proc.wait(timeout=30)
@@ -411,6 +465,17 @@ def _selfcheck() -> None:
     assert _event("claude", {"type": "result", "usage": {"input_tokens": 10, "output_tokens": 5}}) \
         == ("", "finished, 15 tokens")
     assert _event("opencode", {"type": "unheard_of"}) == ("", None)
+
+    # Objects are recognised as they close, so each proposal is announced while it streams.
+    partial = '[{"topic": "how rbf-fd builds a stencil", "domain": "numerics"}, {"topic": "inc'
+    objs = _complete_objects(partial)
+    assert len(objs) == 1, "only the finished object counts"
+    assert _describe(objs[0]) == "proposing how rbf-fd builds a stencil [numerics]"
+    assert _describe('{"n": 3, "why": "derives the weights"}') == "keeping #3: derives the weights"
+    assert _describe('{"other": 1}') is None and _describe("not json") is None
+    braced = _complete_objects('[{"topic": "a {b} c", "domain": "x"}]')
+    assert len(braced) == 1, "braces inside strings are not nesting"
+    assert _describe(braced[0]) == "proposing a {b} c [x]"
 
     assert _argv("opencode", "m", "p", streaming=True)[-2:] == ["--format", "json"]
     assert "--output-format" in _argv("claude", "m", "p", streaming=True)
