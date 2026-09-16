@@ -221,7 +221,8 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
     menu = picker.offer_all(pool, due, snap, cfg) if show_all \
         else picker.offer(pool, due, snap, cfg)
     if not menu:
-        click.echo("nothing to offer — run the curator, or check `sprigly status`")
+        click.echo("nothing to offer — run `sprigly curate` to propose lessons,"
+                   " or `sprigly status` to see what is in flight")
         conn.close()
         return
 
@@ -240,7 +241,8 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
         if taken.kind == "new":
             conn.execute("UPDATE lesson SET state='picked', score=?, updated_at=? WHERE id=?",
                          (taken.score, store.utcnow(), taken.candidate.id))
-            click.echo(f"picked {taken.candidate.id}: {taken.candidate.topic}")
+            click.echo(f"picked {taken.candidate.id}: {taken.candidate.topic}"
+                       f" — run `sprigly tick` to harvest and generate it")
         else:
             click.echo(f"review {taken.candidate.id}: {taken.candidate.topic}")
     conn.close()
@@ -296,7 +298,7 @@ def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
                 f" WHERE id IN ({','.join('?' * len(ids))})", ids):
             table.add_row(str(r["id"]), r["topic"], r["domain"], str(r["depth"]))
         console.print(table)
-        console.print("[dim]run `sprigly next`[/dim]")
+        console.print("[dim]run `sprigly next` to pick a lesson[/dim]")
     conn.close()
 
 
@@ -388,5 +390,5 @@ def redo(cfg: dict, lesson_id: int, stage: str) -> None:
         raise click.ClickException(str(err))
     _, discarded = ticker.REDO_STAGES[stage]
     click.echo(f"lesson {lesson_id} rewound to {state}; discarded {discarded}")
-    click.echo(f"run `sprigly tick --lesson {lesson_id}`")
+    click.echo(f"run `sprigly tick --lesson {lesson_id}` to run that phase again")
     conn.close()
