@@ -115,35 +115,64 @@ test: a topic that yields no credible sources is misnamed or too niche, and the 
 
 ### 3. Picker (the algorithm — the part worth inventing)
 
-Pure functions over a `Snapshot`; nothing in scoring touches the DB, which is what makes the
-weights fittable offline against replayed history.
+Four layers, each borrowed from a different literature. The survey and citations are in
+[docs/picker-literature.md](docs/picker-literature.md).
 
-Six signals, each normalised to 0-1, combined as a weighted mean, plus a flat bonus for lessons in
-any active track:
+**Layer 1 — eligibility gate.** Drop candidates below the prerequisite floor (readiness of zero with
+two or more prerequisites), below `track.min_evidence`, or outside the active tracks under `--only`.
+Knowledge Space Theory calls this the *outer fringe*: ALEKS excludes what you are not ready for and
+lets you choose from the rest, rather than ranking everything and hoping the unready items lose.
+Partial readiness stays a soft weight — a half-met prerequisite is often where the good lesson is.
 
-- **prerequisite readiness** — fraction of prereq tags already covered. A soft weight, not a gate:
-  a half-met prerequisite is often where the interesting lesson is.
-- **review pressure** — overlap with tags of **cards** that are due. Cards are the fsrs unit; a
-  lesson's due date is its earliest due card.
-- **domain diversity** — half-life decay on when that domain was last taught. **Suspended while
-  any track is focused**, because focus is the explicit instruction to stop spreading.
-- **track debt** — stale tracks get a boost. With several tracks active this is also what keeps
-  them advancing fairly, for free.
-- **effort fit** — `est_minutes` against the day's budget. The estimate is the curator's guess;
-  `actual_minutes` is written after generation and both are kept.
-- **revealed preference** — Beta(1,1) posterior mean of picks over offers per domain, so an unseen
-  domain sits at 0.5 rather than 0 or a division by zero.
+**Layer 2 — relevance score.** Pure functions over a `Snapshot`; nothing here touches the DB. A
+weighted sum of:
 
-`offer()` then takes the top k by greedy MMR on tag overlap. Straight top-k returns five phrasings
-of the same topic, which is not a choice. All k are logged as offered and the taken one as picked —
-**the four skips are worth as much as the pick**.
+- **prerequisite readiness** — fraction of prereq tags already covered
+- **review pressure** — overlap with tags of due cards
+- **learning progress** — the *change* in quiz success rate per domain, not its level. ZPDES rewards
+  the derivative, so mastered and hopeless topics both stop being attractive and the zone of
+  proximal development falls out instead of being declared.
+- **track debt** — stale tracks get a boost, which is also what keeps several active tracks
+  advancing fairly with no scheduler
+- **effort fit** — `est_minutes` against the day's budget
+- **revealed preference** — a Beta(1,1) posterior per domain, **sampled rather than averaged**. That
+  is Thompson sampling: principled exploration for one line, no epsilon to tune, and it stops a
+  domain skipped twice from sinking permanently.
 
-**Mastery decay comes free from fsrs**: a tag counts as mastered while at least one card carrying
-it is not overdue. No second forgetting model.
+Every signal is normalised **within the candidate pool**, not absolutely. What matters is not that a
+candidate's effort fit is 0.91 but whether it beats the others on offer today; absolute
+normalisation compresses realistic candidates into a few thousandths of each other and lets noise
+decide. Guard: rescale only when the raw spread exceeds an epsilon, or min-max turns genuinely
+equivalent candidates into a confident ranking.
 
-Housekeeping: candidates unpicked after `candidate_ttl_days` (default 30) go to `expired`. Cold
-start — no history — falls back to curator order, since preference is 0.5 everywhere and diversity
-is 1.0.
+Domain diversity is **not** a signal. It belongs to the next layer.
+
+**Layer 3 — set selection.** Greedy MAP over a DPP kernel `L = diag(q) · S · diag(q)`, with `q` the
+relevance score and `S` tag similarity. The factorisation separates quality from similarity, so a
+focus shrinks the similarity term instead of fighting the score — which is what MMR could not do.
+
+On top of it, **calibration**: fit the offered set's domain distribution to a target mix rather than
+penalising repetition. The goal was never to punish repeating a domain, it was to stay spread across
+unrelated fields, and that is a target distribution. It also composes with focus for free — a
+focused track sets the target to itself.
+
+And a **reserved review lane**: a proportion of the k slots goes to lessons with due cards whenever
+any exist. MEMORIZE shows the optimal schedule is a review *intensity* proportional to recall
+probability — a rate, not a binary due flag — which is what justifies sizing a lane. As one signal
+among six, a due card can be outvoted indefinitely, and fsrs degrades when reviews run late.
+
+`sprigly next` prints the k candidates with their signal breakdowns, logs all k as offered and the
+taken one as picked. **The skips are half the training data.**
+
+**Layer 4 — fitting.** Each `next` is one pick out of k with full feature vectors, which is a
+top-1-of-k choice; its exact likelihood is the conditional logit (McFadden), equivalently
+Plackett-Luce top-1. No invented ground truth, skips used as real negatives. Because it is linear in
+the features, the hand-weighted scorer is not a placeholder — it is the model that gets fitted.
+Keeping the score linear, and scoring pure, are the two properties every later change must preserve.
+
+Housekeeping: candidates unpicked after `candidate_ttl_days` (default 30) go to `expired`. Mastery
+decay comes free from fsrs — a tag counts as mastered while at least one card carrying it is not
+overdue, so there is no second forgetting model.
 
 ### 4. Tags and domains — normalised, not controlled
 

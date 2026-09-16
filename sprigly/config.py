@@ -29,17 +29,34 @@ DEFAULTS: dict[str, Any] = {
         "max_syllabus": 25,
         "default_depth": 3,
     },
+    # Signal weights. Domain spread is deliberately absent: it is a set-level calibration
+    # constraint in `offer`, not a per-candidate penalty.
     "scoring": {
         "prereq": 0.25,
-        "review": 0.20,
-        "diversity": 0.15,
-        "track_debt": 0.10,
+        "review": 0.15,
+        "learning_progress": 0.20,
+        "track_debt": 0.15,
         "effort": 0.10,
-        "preference": 0.20,
-        "focus_bonus": 1.0,
-        "domain_halflife_days": 14.0,
+        "preference": 0.15,
         "track_debt_saturation_days": 21.0,
-        "mmr_lambda": 0.7,
+        "progress_window": 5,
+        # Signals are rescaled within the candidate pool, but only when the pool actually
+        # separates them; below this spread the signal stays flat rather than amplifying noise.
+        "pool_epsilon": 0.02,
+        # Sample revealed preference from its Beta posterior (Thompson sampling) instead of
+        # taking the mean.
+        "thompson": True,
+    },
+    "offer": {
+        "k": 5,
+        # Share of the k slots reserved for lessons with due cards, whenever any exist.
+        "review_lane": 0.4,
+        # Target share of the offered set per domain. Empty means uniform over what exists.
+        "domain_mix": {},
+        "calibration_weight": 0.3,
+        # Focus shrinks tag similarity rather than fighting the relevance score.
+        "focus_similarity_scale": 0.3,
+        "prereq_floor_min_prereqs": 2,
     },
     # depth -> scope hint for the curator, NotebookLM audio length, source budget
     "depth": {
@@ -141,6 +158,7 @@ def _selfcheck() -> None:
         assert cfg2["lesson"]["budget_minutes"] == 45, "file overrides the default"
         assert cfg2["lesson"]["default_language"] == "en", "siblings survive a partial override"
         assert cfg2["scoring"]["prereq"] == 0.25, "untouched sections survive"
+        assert "diversity" not in cfg2["scoring"], "spread is a calibration constraint, not a signal"
         assert cfg2["paths"]["db"].name == "other.db"
 
         assert DEFAULTS["lesson"]["budget_minutes"] == 20, "DEFAULTS must not be mutated"
