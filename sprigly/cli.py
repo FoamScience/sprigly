@@ -91,7 +91,10 @@ def tick(cfg: dict, lesson: int | None) -> None:
             if event == "begin":
                 status.update(f"[cyan]{row['state']}[/cyan] [dim]{topic}[/dim]")
             elif event == "step":
+                # Both: the line scrolls into the log above, and the spinner itself tracks the
+                # current sub-step, so a long phase shows movement rather than one frozen caption.
                 console.print(f"   [dim]{detail}[/dim]")
+                status.update(f"[cyan]{row['state']}[/cyan] [dim]{detail[:70]}[/dim]")
             elif event == "done" and detail != row["state"]:
                 console.print(f"[green]✓[/green] {row['id']:>3}  {row['state']} → {detail}"
                               f"  [dim]{topic}[/dim]")

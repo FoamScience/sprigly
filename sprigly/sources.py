@@ -130,22 +130,36 @@ def resolve_doi(doi: str, mailto: str | None = None) -> Work | None:
     )
 
 
-def search(query: str, limit: int = 20, cfg: dict | None = None) -> list[Work]:
+def search(query: str, limit: int = 20, cfg: dict | None = None, report=None) -> list[Work]:
     """Every adapter, merged and deduplicated.
 
     An adapter that is down must not take the harvest with it — a partial result set is worth more
     than an exception, and the gate downstream decides whether what survived is enough.
+
+    Reported per adapter with its timing: this is the slowest part of a harvest and the part with
+    no agent narrating it, so without this the command looks stalled for minutes.
     """
+    import time
+
+    say = report or (lambda _msg: None)
     mailto = ((cfg or {}).get("sources", {}) or {}).get("mailto") or None
     found: dict[str, Work] = {}
     for name, call in (("openalex", lambda: search_openalex(query, limit, mailto)),
                        ("arxiv", lambda: search_arxiv(query, max(limit // 2, 3)))):
+        say(f"querying {name}")
+        started = time.monotonic()
         try:
-            for w in call():
-                if w.title and w.key not in found:
-                    found[w.key] = w
+            rows = call()
         except Exception as err:
             log.warning("%s adapter failed for %r: %s", name, query, err)
+            say(f"{name} failed after {time.monotonic() - started:.0f}s")
+            continue
+        fresh = 0
+        for w in rows:
+            if w.title and w.key not in found:
+                found[w.key] = w
+                fresh += 1
+        say(f"{name}: {len(rows)} works, {fresh} new ({time.monotonic() - started:.0f}s)")
     return list(found.values())
 
 

@@ -155,8 +155,7 @@ def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None,
     """Search, gate, rank, fetch. Returns source records for the store."""
     say = report or (lambda _msg: None)
     budget = cfg["depth"][str(depth)]["sources"]
-    say("searching openalex and arxiv")
-    found = sources.search(topic, limit=budget * 3, cfg=cfg)
+    found = sources.search(topic, limit=budget * 3, cfg=cfg, report=report)
     log.info("harvest %r: %d candidates", topic, len(found))
     say(f"{len(found)} candidates")
 
@@ -242,7 +241,7 @@ def _selfcheck() -> None:
         dest = Path(td) / "lessons" / "1" / "sources"
         catalogue = [work(f"paper {i}") for i in range(6)] + [off_topic]
 
-        real_search, sources.search = sources.search, lambda q, limit, cfg: catalogue
+        real_search, sources.search = sources.search, lambda q, limit, cfg, report=None: catalogue
         real_fetch = globals()["fetch"]
         globals()["fetch"] = lambda w, dest, cfg: str(dest / f"{_slug(w.title)}.pdf")
         try:
