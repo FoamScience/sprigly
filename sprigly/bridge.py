@@ -34,11 +34,26 @@ def _context(cfg: dict):
 
 
 async def _start(topic, paths, urls, instructions, language, depth, cfg) -> dict[str, Any]:
-    import notebooklm
-
     fmt = AUDIO_FORMATS.get(cfg["depth"][str(depth)]["audio"], "DEEP_DIVE")
     async with _context(cfg) as c:
         nb = await c.notebooks.create(topic[:100])
+        try:
+            return await _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg)
+        except Exception:
+            # Anything that fails after create leaves an empty notebook behind, and the account
+            # has a cap. Tidy up before the error propagates, then let the lesson park and retry.
+            try:
+                await c.notebooks.delete(nb.id)
+                log.info("removed the empty notebook %s after a failed setup", nb.id)
+            except Exception as err:
+                log.warning("could not remove the orphaned notebook %s: %s", nb.id, err)
+            raise
+
+
+async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg) -> dict[str, Any]:
+    import notebooklm
+
+    if True:
         added = []
         for p in paths:
             try:
@@ -189,7 +204,7 @@ def _selfcheck() -> None:
         client = SimpleNamespace(
             notebooks=SimpleNamespace(
                 create=lambda title: _coro(SimpleNamespace(id="nb-1", title=title)),
-                delete=lambda nb: _coro(None)),
+                delete=lambda nb: _coro(calls.append(f"delete:{nb}"))),
             sources=SimpleNamespace(add_file=add_file, add_url=add_url,
                                     wait_all_until_ready=ready_all),
             artifacts=SimpleNamespace(poll_status=poll,
@@ -256,11 +271,14 @@ def _selfcheck() -> None:
                 pass
 
         globals()["_context"] = fake_client(accept=False)
+        calls.clear()
         try:
             start("x", ["/tmp/a.pdf"], cfg, urls=[])
             raise AssertionError("a notebook with no accepted source must not generate")
         except BridgeError as err:
             assert "no source was accepted" in str(err)
+        assert "delete:nb-1" in calls, \
+            "a setup that fails after create must not strand an empty notebook on the account"
 
         # Tidying must never take down a lesson whose artifacts are already on disk.
         globals()["_context"] = fake_client()
