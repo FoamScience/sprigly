@@ -173,6 +173,45 @@ def connect(path: Path | str) -> sqlite3.Connection:
     return conn
 
 
+def backup(conn: sqlite3.Connection, dest_dir: Path, keep: int = 7) -> Path:
+    """Snapshot the database, keeping the newest `keep` copies.
+
+    The event log is the picker's only training data and cannot be regenerated, which is the whole
+    reason this exists.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    # Microseconds, not seconds: two backups in the same second must not land on one filename.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
+    out = dest_dir / f"sprigly-{stamp}.db"
+    with sqlite3.connect(out) as target:
+        conn.backup(target)
+    stale = sorted(dest_dir.glob("sprigly-*.db"))[:-keep] if keep > 0 else []
+    for old in stale:
+        old.unlink()
+    return out
+
+
+def counts_by_state(conn: sqlite3.Connection) -> dict[str, int]:
+    return {r["state"]: r["n"] for r in
+            conn.execute("SELECT state, count(*) AS n FROM lesson GROUP BY state ORDER BY state")}
+
+
+def troubled(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Lessons that failed outright, or are parked mid-retry."""
+    return conn.execute(
+        "SELECT id, topic, state, retry_count, next_attempt_at, last_error FROM lesson"
+        " WHERE last_error IS NOT NULL AND state != 'reviewed' ORDER BY state, id").fetchall()
+
+
+def due_cards(conn: sqlite3.Connection, now: str | None = None) -> tuple[int, str | None]:
+    """How many cards are due, and when the next one comes up."""
+    now = now or utcnow()
+    n = conn.execute("SELECT count(*) FROM card WHERE due IS NOT NULL AND due <= ?",
+                     (now,)).fetchone()[0]
+    nxt = conn.execute("SELECT MIN(due) FROM card WHERE due > ?", (now,)).fetchone()[0]
+    return n, nxt
+
+
 def log_event(conn: sqlite3.Connection, kind: str, lesson_id: int | None = None,
               payload: str | None = None) -> None:
     conn.execute("INSERT INTO event (lesson_id, kind, payload) VALUES (?,?,?)",
@@ -246,6 +285,26 @@ def _selfcheck() -> None:
 
         log_event(conn, "proposed", lid, '{"by":"selfcheck"}')
         assert conn.execute("SELECT count(*) FROM event").fetchone()[0] == 1
+
+        assert counts_by_state(conn) == {"proposed": 2}
+        assert troubled(conn) == []
+        conn.execute("UPDATE lesson SET state='failed', last_error='boom' WHERE id=?", (lid,))
+        assert [r["id"] for r in troubled(conn)] == [lid]
+
+        conn.execute("UPDATE card SET due='2020-01-01T00:00:00Z' WHERE front_hash='h1'")
+        n, nxt = due_cards(conn)
+        assert n == 1 and nxt is None, "nothing scheduled ahead yet"
+        conn.execute("UPDATE card SET due='2099-01-01T00:00:00Z' WHERE front_hash='h2'")
+        assert due_cards(conn) == (1, "2099-01-01T00:00:00Z")
+
+        backups = Path(td) / "backups"
+        for _ in range(3):
+            backup(conn, backups, keep=2)
+        kept = sorted(backups.glob("sprigly-*.db"))
+        assert len(kept) == 2, "old backups are pruned, newest kept"
+        restored = sqlite3.connect(kept[-1])
+        assert restored.execute("SELECT count(*) FROM event").fetchone()[0] == 1, "backup is readable"
+        restored.close()
 
         conn.execute("DELETE FROM lesson WHERE id=?", (lid,))
         assert conn.execute("SELECT count(*) FROM lesson_source").fetchone()[0] == 0, \

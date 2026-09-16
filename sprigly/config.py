@@ -71,6 +71,9 @@ DEFAULTS: dict[str, Any] = {
         "max_retries": 5,
         "retry_backoff_seconds": 60,
     },
+    "store": {
+        "backup_keep": 7,
+    },
     "delivery": {
         "retention_video_days": 30,
         "freshen_new_sources": 3,

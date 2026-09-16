@@ -147,7 +147,9 @@ def expire_candidates(conn, cfg) -> int:
 def run(conn, cfg) -> Counter:
     """One pass. Returns a count of the transitions made."""
     moved: Counter = Counter()
-    moved["expired"] += expire_candidates(conn, cfg)
+    expired = expire_candidates(conn, cfg)
+    if expired:
+        moved["expired"] = expired
     now = utcnow()
     # A lesson advances at most once per pass. Without this, a lesson moved into `uploading` would
     # be picked up again by the `uploading` handler later in the same loop and run the whole
