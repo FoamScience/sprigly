@@ -3,7 +3,8 @@
 Teaches one small, well-scoped thing at a time, across diverse domains — numerics, physics, human
 sciences, business. A CLI orchestrates the pipeline: an agent proposes topics and harvests open-access
 source material, NotebookLM turns that material into a podcast, a slide deck and a quiz, and the
-artifacts land in a folder that Syncthing mirrors to your phone. Larger milestones are *tracks*,
+artifacts land in a lesson directory you open on the machine, or as a notebook you open in the
+NotebookLM app on your phone. Larger milestones are *tracks*,
 filled in by the small lessons.
 
 Design and rationale: [DESIGN.md](DESIGN.md).
@@ -18,7 +19,6 @@ Early implementation. NotebookLM account setup is done and the project skeleton,
 - [`uv`](https://docs.astral.sh/uv/) — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - A Google account with NotebookLM (Gemini Notebook) access
 - Chrome, signed in to that account
-- Syncthing on both machine and phone (only needed once delivery exists)
 
 ## Step 0 — NotebookLM account setup
 

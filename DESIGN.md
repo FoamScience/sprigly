@@ -38,14 +38,15 @@ Tradeoff accepted: choosing the next lesson requires a terminal.
   sprigly next              sprigly tick (systemd timer)
        |                            |
        v                            v
-  +----------+   +-----------+   +-----------+   +-------------+   +----------+
-  | Curator  |-->|  Picker   |-->| Harvester |-->|  NotebookLM |-->|   Drop   |
-  | (agent)  |   | (scorer)  |   |  (agent)  |   |   Bridge    |   | (folder) |
-  +----------+   +-----------+   +-----------+   +-------------+   +----------+
-       ^              ^                                                  |
-       |              |                                            Syncthing
-       |              |                                                  v
-       +--------------+---------- Store (SQLite) <---- Feedback <--- phone/machine
+  +----------+   +-----------+   +-----------+   +-------------+   +-----------+
+  | Curator  |-->|  Picker   |-->| Harvester |-->|  NotebookLM |-->|  Lesson   |
+  | (agent)  |   | (scorer)  |   |  (agent)  |   |   Bridge    |   | directory |
+  +----------+   +-----------+   +-----------+   +-------------+   +-----------+
+       ^              ^                                 |                 |
+       |              |                        NotebookLM app        sprigly play
+       |              |                          (phone)                  |
+       +--------------+---------- Store (SQLite) <---- Feedback <---------+
+                                                    (sprigly done)
 ```
 
 ### 1. Store — `sprigly.db` (SQLite)
@@ -503,7 +504,7 @@ One TOML file. Everything below is a knob, and none of it is a code change:
    container the audio actually is.
 1. Store, state machine, `tick` with the generation poll.
 2. Bridge wrapper. Real artifacts end to end for a hardcoded topic.
-3. Drop folder, notes, Syncthing, deletion-as-consumed. Usable at this point, fed manually.
+3. Lesson notes and `sprigly play`. Usable at this point, fed manually.
 4. Curator, tag normalisation, `next` with a hand-weighted `score()`.
 5. Focus, multiple active tracks, depth.
 6. Harvester and the credibility gate, then the yield spike that sets its thresholds.
