@@ -69,6 +69,20 @@ def _slug(text: str, limit: int = 60) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:limit] or "source"
 
 
+CHALLENGE_MARKERS = (b"client challenge", b"just a moment", b"attention required",
+                     b"enable javascript", b"checking your browser")
+
+
+def _challenge(head: bytes) -> bool:
+    """Is this an anti-bot interstitial rather than the article?
+
+    Worth naming separately: it is not a paywall and not a broken link, so retrying or blaming the
+    source is wrong. The copy simply is not reachable without executing the publisher's JavaScript,
+    and the URL goes to NotebookLM instead.
+    """
+    return any(m in head[:4000].lower() for m in CHALLENGE_MARKERS)
+
+
 def _is_pdf(head: bytes) -> bool:
     """A PDF starts with %PDF. Publishers answer pdf_url with paywall and consent pages that are
     perfectly valid HTML, and saving one under a .pdf name feeds NotebookLM an error page as a
@@ -102,10 +116,10 @@ def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
     dest.mkdir(parents=True, exist_ok=True)
     stem = _slug(w.title)
 
-    if w.pdf_url:
-        path = dest / f"{stem}.pdf"
+    path = dest / f"{stem}.pdf"
+    for candidate in (w.pdf_urls or ([w.pdf_url] if w.pdf_url else [])):
         try:
-            with httpx.stream("GET", w.pdf_url, timeout=timeout, follow_redirects=True) as r:
+            with httpx.stream("GET", candidate, timeout=timeout, follow_redirects=True) as r:
                 r.raise_for_status()
                 written, first, ok = 0, True, True
                 with path.open("wb") as fh:
@@ -113,13 +127,14 @@ def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
                         if first:
                             first = False
                             if not _is_pdf(chunk):
-                                log.warning("%s answered with %s, not a pdf", w.pdf_url,
-                                            r.headers.get("content-type", "unknown content"))
+                                why = ("an anti-bot challenge" if _challenge(chunk)
+                                       else r.headers.get("content-type", "unknown content"))
+                                log.warning("%s answered with %s, not a pdf", candidate, why)
                                 ok = False
                                 break
                         written += len(chunk)
                         if written > limit:
-                            log.warning("%s exceeds max_bytes, abandoning", w.pdf_url)
+                            log.warning("%s exceeds max_bytes, abandoning", candidate)
                             ok = False
                             break
                         fh.write(chunk)
@@ -127,7 +142,7 @@ def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
                 return str(path)
             path.unlink(missing_ok=True)
         except Exception as err:
-            log.warning("pdf fetch failed for %s: %s", w.pdf_url, err)
+            log.warning("pdf fetch failed for %s: %s", candidate, err)
             path.unlink(missing_ok=True)
 
     try:
@@ -235,6 +250,10 @@ def _selfcheck() -> None:
     assert rank_relevance("x", depth, [], cfg, boom) == ([], []), "no candidates, no agent call"
 
     # A publisher answering pdf_url with a consent page is the common case, not an edge one.
+    assert _challenge(b"<html><title>Client Challenge</title>"), "springer's interstitial"
+    assert _challenge(b"<h1>Just a moment...</h1>"), "cloudflare's"
+    assert not _challenge(b"<html><body>an ordinary landing page</body></html>")
+
     assert _is_pdf(b"%PDF-1.5\n...")
     assert _is_pdf(b"\n  %PDF-1.4")
     assert not _is_pdf(b"<!DOCTYPE html>\n<html>")

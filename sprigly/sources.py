@@ -33,6 +33,9 @@ class Work:
     pdf_url: str | None = None
     retracted: bool = False
     paratext: bool = False
+    # Every OA copy that offers a file, repository-hosted first. Publishers increasingly answer a
+    # direct pdf link with a bot challenge; a university repository usually just serves the file.
+    pdf_urls: list[str] = field(default_factory=list)
     api: str = ""
     authors: list[str] = field(default_factory=list)
 
@@ -40,6 +43,24 @@ class Work:
     def key(self) -> str:
         """Identity for dedup: the DOI when there is one, else the URL."""
         return (self.doi or self.url).lower()
+
+
+PUBLISHER_HOSTS = ("link.springer.com", "sciencedirect.com", "onlinelibrary.wiley.com",
+                   "tandfonline.com", "nature.com", "science.org", "ieeexplore.ieee.org",
+                   "dl.acm.org", "cambridge.org", "oup.com", "sagepub.com")
+
+
+def _pdf_candidates(w: dict) -> list[str]:
+    """Distinct OA pdf links, repositories before publishers."""
+    seen: dict[str, int] = {}
+    for loc in [w.get("best_oa_location") or {}, *(w.get("locations") or [])]:
+        url = loc.get("pdf_url")
+        if not url or not loc.get("is_oa") or url in seen:
+            continue
+        host = (loc.get("source") or {}).get("type") == "repository"
+        publisher = any(p in url for p in PUBLISHER_HOSTS)
+        seen[url] = 0 if host and not publisher else (2 if publisher else 1)
+    return sorted(seen, key=seen.get)
 
 
 def _openalex_work(w: dict) -> Work:
@@ -59,6 +80,7 @@ def _openalex_work(w: dict) -> Work:
         cited_by=w.get("cited_by_count") or 0,
         is_oa=bool(oa.get("is_oa")),
         pdf_url=best.get("pdf_url") or loc.get("pdf_url"),
+        pdf_urls=_pdf_candidates(w),
         retracted=bool(w.get("is_retracted")),
         paratext=bool(w.get("is_paratext")),
         api="openalex",
@@ -187,6 +209,19 @@ def _selfcheck() -> None:
     assert (w.venue, w.venue_type, w.year, w.work_type, w.cited_by) == \
         ("Journal of Computational Physics", "journal", 2017, "article", 62)
     assert w.is_oa and w.pdf_url.endswith(".pdf") and not w.retracted
+
+    # Every OA copy is worth a try, and a repository copy is tried before the publisher's.
+    many = _openalex_work({**raw, "locations": [
+        {"is_oa": True, "pdf_url": "https://link.springer.com/content/pdf/x.pdf",
+         "source": {"type": "journal"}},
+        {"is_oa": True, "pdf_url": "https://repo.example.edu/x.pdf",
+         "source": {"type": "repository"}},
+        {"is_oa": False, "pdf_url": "https://paywalled.example.com/x.pdf",
+         "source": {"type": "journal"}},
+    ], "best_oa_location": {"pdf_url": "https://link.springer.com/content/pdf/x.pdf"}})
+    assert many.pdf_urls[0] == "https://repo.example.edu/x.pdf", "repositories come first"
+    assert "paywalled.example.com" not in " ".join(many.pdf_urls), "a closed copy is not a candidate"
+    assert len(many.pdf_urls) == len(set(many.pdf_urls)), "no duplicates"
     assert w.key == w.doi, "a work with a doi is identified by it"
 
     bare = _openalex_work({"display_name": "x", "id": "https://openalex.org/W9"})
