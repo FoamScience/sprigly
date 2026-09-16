@@ -244,7 +244,7 @@ preprint, report, dissertation}, or **no open-access location** — paywalled so
 | A | Peer-reviewed journal or conference, OA fulltext | |
 | A− | Preprint (arXiv, bioRxiv) | Never the *only* source for a lesson |
 | B | Institutional: `.edu`, `.ac.*`, `.gov`, national labs, standards bodies, statistical agencies | |
-| C | Video, by explicit per-channel allowlist | Channel IDs, never "YouTube" |
+| C | Video, by explicit per-channel allowlist | Matched as host **and path**: matching on hostname alone turns one allowlisted channel into the whole of YouTube |
 | M | `sprigly harvest --allow <url>` | Manual override, logged as such |
 
 Deliberately **not** gates: a citation-count minimum (it penalises recent work, and a good 2024
@@ -266,8 +266,10 @@ human sciences, where the good primary material is working papers, regulator fil
 statistics rather than journal articles.
 
 So the bar is per-track, not global. Every source carries a tier; every lesson derives an
-`evidence_level` of `peer-reviewed`, `preprint`, `institutional`, `practitioner` or `mixed`, shown
-in its notes and in `sprigly sources <id>`. `track.min_evidence` sets the tolerance — defaulting to
+`evidence_level` — `peer-reviewed`, `preprint`, `institutional`, `practitioner` or `manual` — from
+its **weakest** admitted source, since what a lesson rests on is its floor and not its best
+citation. One preprint among nine journal articles makes the lesson a preprint lesson. Shown in its
+notes and in `sprigly sources <id>`. `track.min_evidence` sets the tolerance — defaulting to
 `peer-reviewed` for STEM tracks and `institutional` for business ones. **The system never silently
 downgrades**; it flags or refuses.
 

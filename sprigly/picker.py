@@ -61,8 +61,10 @@ def eligible(c: Candidate, s: Snapshot, cfg: dict) -> bool:
     # and is gated again at generation time.
     want = s.min_evidence.get(c.track_id) if c.track_id else None
     if want and c.evidence_level:
-        order = ["practitioner", "institutional", "preprint", "mixed", "peer-reviewed"]
-        if order.index(c.evidence_level) < order.index(want):
+        from .gate import LEVEL_ORDER
+
+        if c.evidence_level in LEVEL_ORDER and want in LEVEL_ORDER \
+                and LEVEL_ORDER.index(c.evidence_level) < LEVEL_ORDER.index(want):
             return False
     return True
 
