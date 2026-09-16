@@ -94,9 +94,9 @@ def raw_signals(c: Candidate, s: Snapshot, cfg: dict, rng: random.Random) -> dic
     return {
         "prereq": readiness(c, s),
         "review": review,
-        # Constant across the pool until the feedback loop fills it, and a constant signal
-        # contributes nothing once normalised.
-        "learning_progress": s.progress.get(c.domain, 0.0),
+        # A domain with no grading history is neutral, not failing: 0.5, never 0. Absent evidence
+        # and evidence of decline must not score the same.
+        "learning_progress": s.progress.get(c.domain, 0.5),
         "track_debt": debt,
         "effort": effort,
         "preference": pref,
@@ -381,6 +381,13 @@ def _selfcheck() -> None:
 
     assert offer(pool, [], s, cfg, random.Random(5))[0].kind == "new", "no reviews, no lane"
     assert len(offer([], due, s, cfg, random.Random(5))) == 2, "reviews alone still offer"
+
+    # --- learning progress is neutral where there is no evidence, and steers where there is
+    mixed = Snapshot(now=now, progress={"operations-research": 0.9, "mathematics": 0.1})
+    sig = lambda dom: raw_signals(cand(300, domain=dom), mixed, cfg, random.Random(1))
+    assert sig("operations-research")["learning_progress"] == 0.9
+    assert sig("mathematics")["learning_progress"] == 0.1
+    assert sig("never-studied")["learning_progress"] == 0.5, "no evidence sits between the two"
 
     # --- cold start: no history, no tags, no domains, fewer candidates than slots
     empty = Snapshot(now=now)

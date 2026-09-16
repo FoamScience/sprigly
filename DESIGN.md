@@ -151,9 +151,14 @@ weighted sum of:
 
 - **prerequisite readiness** — fraction of prereq tags already covered
 - **review pressure** — overlap with tags of due cards
-- **learning progress** — the *change* in quiz success rate per domain, not its level. ZPDES rewards
-  the derivative, so mastered and hopeless topics both stop being attractive and the zone of
-  proximal development falls out instead of being declared.
+- **learning progress** — the *change* in quiz success rate per domain, not its level, measured
+  over a window of recent grades against the window before it. ZPDES rewards the derivative, so a
+  mastered domain and a hopeless one are both neutral, and what attracts effort is where the
+  success rate is still moving; the zone of proximal development falls out instead of being
+  declared. A grade of `Again` is a lapse and everything else counts as recall — the difference
+  between `Hard` and `Good` is the scheduler's business, not the question of whether you knew it.
+  A domain with too little history is **absent** rather than zero, and reads as 0.5: no evidence
+  and evidence of decline must not score the same.
 - **track debt** — stale tracks get a boost, which is also what keeps several active tracks
   advancing fairly with no scheduler
 - **effort fit** — `est_minutes` against the day's budget. That is the curator's guess, because

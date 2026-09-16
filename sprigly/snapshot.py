@@ -74,10 +74,57 @@ SELECT l.{col} AS k, MAX(e.created_at) AS t FROM event e JOIN lesson l ON l.id =
 WHERE e.kind = 'ready' AND l.{col} IS NOT NULL GROUP BY l.{col}
 """
 
+# Grades in order, with the domain they belong to. Everything else is derived in Python: the
+# windowing is easier to read there and the volume is tiny.
+GRADES = """
+SELECT l.domain AS k, e.payload AS payload FROM event e JOIN lesson l ON l.id = e.lesson_id
+WHERE e.kind = 'graded' AND l.domain IS NOT NULL ORDER BY e.id
+"""
+
 BY_DOMAIN = """
 SELECT l.domain AS k, COUNT(*) AS n FROM event e JOIN lesson l ON l.id = e.lesson_id
 WHERE e.kind = ? AND l.domain IS NOT NULL GROUP BY l.domain
 """
+
+
+# A grade of Again is a lapse. Hard was still recalled, so it counts as a success — the distinction
+# between Hard and Good belongs to the scheduler, not to whether you knew it.
+LAPSE = "Again"
+
+
+def progress_by_domain(conn: sqlite3.Connection, window: int) -> dict[str, float]:
+    """Change in quiz success rate per domain, as a 0-1 signal centred on 0.5.
+
+    ZPDES rewards learning *progress* — the derivative — rather than competence. A domain you have
+    mastered stops being rewarding, and so does one you keep failing; what attracts effort is the
+    place where the success rate is still moving. Absolute mastery is already handled elsewhere,
+    by fsrs deciding which tags are overdue.
+
+    A domain without enough history is absent from the result rather than being reported as zero:
+    "no evidence" and "getting worse" must not look the same to the scorer.
+    """
+    import json
+
+    grades: dict[str, list[int]] = {}
+    for row in conn.execute(GRADES):
+        try:
+            rating = (json.loads(row["payload"]) or {}).get("rating")
+        except (TypeError, ValueError):
+            continue
+        if rating:
+            grades.setdefault(row["k"], []).append(int(rating != LAPSE))
+
+    out: dict[str, float] = {}
+    for domain, marks in grades.items():
+        if len(marks) < window + 1:
+            continue
+        recent = marks[-window:]
+        earlier = marks[-2 * window:-window] or marks[:-window]
+        if not earlier:
+            continue
+        delta = (sum(recent) / len(recent)) - (sum(earlier) / len(earlier))
+        out[domain] = (delta + 1.0) / 2.0
+    return out
 
 
 def load(conn: sqlite3.Connection, cfg: dict, now: str | None = None) -> Snapshot:
@@ -97,6 +144,7 @@ def load(conn: sqlite3.Connection, cfg: dict, now: str | None = None) -> Snapsho
                       conn.execute("SELECT id, min_evidence FROM track")},
         focus_track_ids={r["id"] for r in tracks},
         focus_exclusive=any(r["exclusive"] for r in tracks),
+        progress=progress_by_domain(conn, cfg["scoring"]["progress_window"]),
     )
 
 
@@ -210,6 +258,36 @@ def _selfcheck() -> None:
         assert load(conn, cfg, now=now).focus_track_ids == set()
 
         assert snap.budget_minutes == cfg["lesson"]["budget_minutes"]
+
+        # Learning progress: the derivative, not the level.
+        import json as _j
+
+        def graded(lesson, ratings):
+            for r in ratings:
+                conn.execute("INSERT INTO event (lesson_id, kind, payload) VALUES (?,'graded',?)",
+                             (lesson, _j.dumps({"rating": r})))
+
+        improving = lesson("optimisation", "operations-research", "reviewed")
+        graded(improving, ["Again", "Again", "Again", "Good", "Good", "Good"])
+        plateaued = lesson("regression", "statistics", "reviewed")
+        graded(plateaued, ["Good"] * 6)
+        slipping = lesson("topology", "mathematics", "reviewed")
+        graded(slipping, ["Good", "Good", "Good", "Again", "Again", "Again"])
+
+        prog = progress_by_domain(conn, 3)
+        assert prog["operations-research"] > 0.5, "a domain getting better attracts effort"
+        assert abs(prog["statistics"] - 0.5) < 1e-9, "a mastered domain is neutral, not attractive"
+        assert prog["mathematics"] < 0.5, "a domain slipping is not where progress is"
+        assert "numerics" not in prog, "a domain with no grades is absent, not zero"
+
+        thin_history = lesson("sheaves", "category-theory", "reviewed")
+        graded(thin_history, ["Good", "Good"])
+        assert "category-theory" not in progress_by_domain(conn, 3), \
+            "too little history is no evidence"
+
+        cfg["scoring"]["progress_window"] = 3
+        assert load(conn, cfg, now=now).progress == prog, \
+            "the snapshot carries it, at the configured window"
         conn.close()
     print("snapshot selfcheck ok")
 
