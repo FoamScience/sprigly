@@ -451,3 +451,76 @@ def ask(cfg: dict, lesson_id: int, question: tuple[str, ...]) -> None:
     console.print(Markdown(str(getattr(answer, "answer", None) or answer)))
     store.log_event(conn, "asked", lesson_id, _json.dumps({"question": text}))
     conn.close()
+
+
+def _mark_consumed(conn, lesson_id: int, via: str) -> bool:
+    """Move a ready lesson on. Returns whether it actually moved."""
+    from . import store
+
+    row = conn.execute("SELECT state FROM lesson WHERE id=?", (lesson_id,)).fetchone()
+    if not row:
+        raise click.ClickException(f"no lesson {lesson_id}")
+    store.log_event(conn, "consumed", lesson_id, _json.dumps({"via": via}))
+    if row["state"] == "ready":
+        conn.execute("UPDATE lesson SET state='consumed', updated_at=? WHERE id=?",
+                     (store.utcnow(), lesson_id))
+        return True
+    return False
+
+
+@main.command()
+@click.argument("lesson_id", type=int)
+@click.option("--kind", default="audio", show_default=True,
+              help="Which artifact to open: audio, video, slides, quiz.")
+@click.pass_obj
+def play(cfg: dict, lesson_id: int, kind: str) -> None:
+    """Open a lesson's artifact and record that you consumed it.
+
+    This is the machine-side counterpart of deleting the file on the phone. Opening is taken as
+    consumption because you asked for it by name — a lesson never advances on its own.
+    """
+    import shutil
+    import subprocess
+
+    from . import store
+
+    conn = store.connect(cfg["paths"]["db"])
+    art = conn.execute("SELECT path FROM artifact WHERE lesson_id=? AND kind=?",
+                       (lesson_id, kind)).fetchone()
+    if not art:
+        have = [r[0] for r in conn.execute(
+            "SELECT kind FROM artifact WHERE lesson_id=?", (lesson_id,))]
+        raise click.ClickException(
+            f"lesson {lesson_id} has no {kind}" + (f"; it has {', '.join(have)}" if have else ""))
+    path = Path(art["path"])
+    if not path.exists():
+        raise click.ClickException(f"{path} is missing — try `sprigly redo {lesson_id} --from upload`")
+
+    opener = shutil.which("xdg-open") or shutil.which("open")
+    if opener:
+        subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        click.echo(f"opened {path}")
+    else:
+        click.echo(str(path))
+    if _mark_consumed(conn, lesson_id, f"play:{kind}"):
+        click.echo(f"lesson {lesson_id} marked consumed — `sprigly done {lesson_id}` to rate it")
+    conn.close()
+
+
+@main.command()
+@click.argument("lesson_id", type=int)
+@click.option("--rating", type=click.IntRange(1, 5), help="How useful it was, 1 to 5.")
+@click.option("--note", default="", help="Anything worth remembering about it.")
+@click.pass_obj
+def done(cfg: dict, lesson_id: int, rating: int | None, note: str) -> None:
+    """Record what you thought of a lesson, and mark it consumed if it was not already."""
+    from . import store
+
+    conn = store.connect(cfg["paths"]["db"])
+    _mark_consumed(conn, lesson_id, "done")
+    store.log_event(conn, "rated", lesson_id,
+                    _json.dumps({"rating": rating, "note": note.strip() or None}))
+    click.echo(f"recorded for lesson {lesson_id}"
+               + (f": rating {rating}" if rating else "")
+               + (f" — {note.strip()}" if note.strip() else ""))
+    conn.close()

@@ -364,9 +364,16 @@ local-folder plus auto-delete combination during step 0; it is assumed, not conf
 Two guards this needs: sprigly's own retention pruning writes a `pruned` event so it is never
 mistaken for consumption, and only the drop projection is ever deleted — originals stay.
 
-**There is no auto-advance.** A lesson sits in `ready` until something actually reports back:
-deletion-sync, `sprigly play <id>` on the machine (which opens the artifact and logs the event), or
-an explicit `sprigly done <id>`. A stalled queue is honest; a fabricated completion is not.
+**There is no auto-advance.** A lesson sits in `ready` until something actually reports back, by
+one of three routes:
+
+- **deletion-sync** — the drop folder's media are gone, so the next tick marks it consumed
+- **`sprigly play <id>`** — opens the artifact with `xdg-open` and records it. Opening counts as
+  consumption because you named the lesson yourself; nothing infers it
+- **`sprigly done <id> --rating N --note "…"`** — records what you thought, and marks it consumed
+  if it was not already
+
+A stalled queue is honest; a fabricated completion is not.
 
 Retention: audio and notes are kept indefinitely (they are small); video is pruned after
 `retention_video_days` (default 30) while its slide deck survives.
