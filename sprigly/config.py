@@ -66,6 +66,12 @@ DEFAULTS: dict[str, Any] = {
         "4": {"scope": "a single design decision inside a method", "audio": "deep-dive", "sources": 12},
         "5": {"scope": "one derivation, one paper, one failure mode", "audio": "deep-dive", "sources": 15},
     },
+    "tags": {
+        # Abbreviations are expanded only from this map. Nothing is guessed.
+        "expansions": {},
+        # How close a new tag must be to an existing one before it snaps onto it.
+        "snap_cutoff": 0.92,
+    },
     "sources": {
         "open_access_only": True,
         "allowed_types": ["article", "review", "book-chapter", "preprint", "report", "dissertation"],

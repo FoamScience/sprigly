@@ -180,8 +180,19 @@ A maintained controlled vocabulary does not survive topics ranging from quantum 
 business. Instead, **normalise on write**: US English spelling, lowercase, no abbreviations,
 hyphen-separated words. Domains get the same treatment.
 
-The drift mitigation is cheap: the existing tag list is passed into the curator prompt as "reuse
-these where they fit". The vocabulary emerges and stays consistent without anyone maintaining it.
+Two mechanisms, both cheap. `tags.write()` is the single place tags enter the database, so no writer
+can forget to normalise. And near-duplicates snap onto the existing vocabulary — singular against
+plural, a stray suffix — at a deliberately high cutoff, because `rbf-fd` and `rbf-qr` are different
+methods and must never collapse into one.
+
+Spelling is a curated map, not a rule. "-our to -or" would wreck *four*, *your*, *tour*, *hour*,
+*flour* and *contour*; "-re to -er" would wreck *are*, *here* and *genre*. Only the -ise/-ize family
+gets a suffix rule, guarded by the standard exception list (*rise*, *exercise*, *promise*,
+*expertise*, ...). Abbreviations expand solely from an explicit config map: guessing is how `fem`
+ends up meaning both the finite element method and field emission microscopy in one database.
+
+The existing tag list is also passed into the curator prompt as "reuse these where they fit", so the
+vocabulary emerges and stays consistent without anyone maintaining it.
 
 This matters more than it looks — prereq readiness, review pressure and MMR all work by set
 intersection, and `RBF` vs `rbf` vs `radial-basis-functions` silently sends three of six signals
