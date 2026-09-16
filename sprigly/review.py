@@ -149,9 +149,16 @@ def grade(conn, card_row, rating_name: str, now: datetime | None = None) -> str:
 
 
 def finish(conn, lesson_id: int) -> None:
-    """A lesson whose cards have been graded has been reviewed."""
-    conn.execute("UPDATE lesson SET state='reviewed', updated_at=? WHERE id=? AND state='consumed'",
-                 (utcnow(), lesson_id))
+    """A lesson whose cards have been graded has been reviewed.
+
+    Grading is itself proof of engagement, so this promotes from `ready` as well as `consumed`.
+    Requiring `consumed` first stranded quizzed lessons in `ready` forever — and because
+    `mastered_tags` only counts reviewed lessons, prerequisite readiness and review pressure both
+    stayed empty no matter how much was graded.
+    """
+    conn.execute(
+        "UPDATE lesson SET state='reviewed', updated_at=? WHERE id=? AND state IN ('ready','consumed')",
+        (utcnow(), lesson_id))
     store.log_event(conn, "reviewed", lesson_id)
 
 
@@ -246,6 +253,20 @@ def _selfcheck() -> None:
 
         finish(conn, lid)
         assert conn.execute("SELECT state FROM lesson WHERE id=?", (lid,)).fetchone()[0] == "reviewed"
+
+        # Quizzing a lesson you never marked consumed still counts: grading is the engagement.
+        straight = conn.execute(
+            "INSERT INTO lesson (topic, state) VALUES ('quizzed from ready','ready')").lastrowid
+        finish(conn, straight)
+        assert conn.execute("SELECT state FROM lesson WHERE id=?",
+                            (straight,)).fetchone()[0] == "reviewed"
+
+        # A lesson still in flight is not promoted by a stray call.
+        early = conn.execute(
+            "INSERT INTO lesson (topic, state) VALUES ('mid-flight','generating')").lastrowid
+        finish(conn, early)
+        assert conn.execute("SELECT state FROM lesson WHERE id=?",
+                            (early,)).fetchone()[0] == "generating"
         kinds = {r[0] for r in conn.execute("SELECT kind FROM event WHERE lesson_id=?", (lid,))}
         assert {"cards", "graded", "reviewed"} <= kinds
         conn.close()
