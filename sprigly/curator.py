@@ -13,6 +13,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 from . import store, tags
@@ -36,26 +37,115 @@ def render(name: str, **ctx) -> str:
     return text
 
 
-def run_agent(prompt: str, cfg: dict, role: str = "bulk") -> str:
-    """Shell out to whichever agent CLI is configured. No SDK; the prompt is the product."""
-    a = cfg["agent"]
-    backend = a["backend"]
-    try:
-        model = a["models"][backend][role]
-    except KeyError:
-        raise CuratorError(f"no model configured for backend {backend!r} role {role!r}") from None
+# Both CLIs already emit newline-delimited JSON events, so watching an agent work needs no SDK
+# and no extra dependency — only the right flag and a parser per backend.
+STREAM_FLAGS = {"claude": ["--output-format", "stream-json", "--verbose"],
+                "opencode": ["--format", "json"]}
+
+
+def _argv(backend: str, model: str, prompt: str, streaming: bool) -> list[str]:
     if backend == "claude":
         argv = ["claude", "-p", prompt, "--model", model]
     elif backend == "opencode":
         argv = ["opencode", "run", "-m", model, prompt]
     else:
         raise CuratorError(f"unknown agent backend {backend!r}")
+    return argv + (STREAM_FLAGS[backend] if streaming else [])
+
+
+def _event(backend: str, ev: dict) -> tuple[str, str | None]:
+    """One streamed event -> (text it contributes, a line worth showing).
+
+    The two backends disagree about everything except being NDJSON, so the differences are absorbed
+    here rather than leaking into the caller.
+    """
+    kind = ev.get("type")
+    if backend == "opencode":
+        part = ev.get("part") or {}
+        if kind == "text":
+            return part.get("text") or "", None
+        if kind == "reasoning":
+            return "", "thinking"
+        if kind == "tool":
+            return "", f"tool {part.get('tool') or part.get('name') or '?'}"
+        if kind == "step_finish":
+            tok = (part.get("tokens") or {}).get("total")
+            return "", f"finished, {tok} tokens" if tok else "finished"
+        return "", None
+    if kind == "assistant":
+        text, note = "", None
+        for block in (ev.get("message") or {}).get("content") or []:
+            if block.get("type") == "text":
+                text += block.get("text") or ""
+            elif block.get("type") == "thinking":
+                note = "thinking"
+            elif block.get("type") == "tool_use":
+                note = f"tool {block.get('name')}"
+        return text, note
+    if kind == "result":
+        usage = ev.get("usage") or {}
+        tok = (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
+        return "", f"finished, {tok} tokens" if tok else "finished"
+    return "", None
+
+
+def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
+    """Shell out to whichever agent CLI is configured. No SDK; the prompt is the product.
+
+    With a `report` callback the run is streamed, so a several-minute agent call shows what it is
+    doing instead of looking like a hang. Without one it is a plain blocking call.
+    """
+    a = cfg["agent"]
+    backend = a["backend"]
+    try:
+        model = a["models"][backend][role]
+    except KeyError:
+        raise CuratorError(f"no model configured for backend {backend!r} role {role!r}") from None
+    argv = _argv(backend, model, prompt, streaming=bool(report))
     if not shutil.which(argv[0]):
         raise CuratorError(f"{argv[0]} is not on PATH")
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=a["timeout_seconds"])
-    if done.returncode != 0:
-        raise CuratorError(f"{argv[0]} exited {done.returncode}: {done.stderr.strip()[:200]}")
-    return done.stdout
+
+    if not report:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=a["timeout_seconds"])
+        if done.returncode != 0:
+            raise CuratorError(f"{argv[0]} exited {done.returncode}: {done.stderr.strip()[:200]}")
+        return done.stdout
+
+    report(f"asking {backend} {model}")
+    deadline = time.monotonic() + a["timeout_seconds"]
+    collected, shown = [], 0
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            bufsize=1)
+    try:
+        for line in proc.stdout:
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise CuratorError(f"{argv[0]} exceeded {a['timeout_seconds']}s")
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text, note = _event(backend, ev)
+            if text:
+                collected.append(text)
+                total = sum(len(t) for t in collected)
+                # A preview every few hundred characters: enough to see it working, not a firehose.
+                if total - shown >= 400:
+                    shown = total
+                    report(f"{total} chars: {text.strip()[-70:]}")
+            if note:
+                report(note)
+        proc.wait(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    if proc.returncode != 0:
+        raise CuratorError(f"{argv[0]} exited {proc.returncode}: "
+                           f"{(proc.stderr.read() or '').strip()[:200]}")
+    return "".join(collected)
 
 
 def extract_json(text: str) -> list[dict]:
@@ -124,7 +214,7 @@ def validate(items: list) -> list[dict]:
 
 
 def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=None,
-        validator=None) -> list[dict]:
+        validator=None, report=None) -> list[dict]:
     """Ask, validate, and on malformed output ask again with the complaint attached.
 
     The validator is a parameter because not every prompt returns lessons — the relevance pass
@@ -136,7 +226,7 @@ def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=N
     while attempt <= cfg["agent"]["max_retries"]:
         text = runner(prompt if attempt == 0 else
                       f"{prompt}\n\nYour previous reply was rejected: {last}\nReturn only the JSON array.",
-                      cfg, role)
+                      cfg, role, report=report)
         try:
             return validator(extract_json(text))
         except (CuratorError, json.JSONDecodeError) as err:
@@ -190,10 +280,10 @@ def build_prompt(conn: sqlite3.Connection, cfg: dict, track_id: int | None = Non
 
 
 def propose(conn: sqlite3.Connection, cfg: dict, track_id: int | None = None,
-            n: int | None = None, runner=run_agent, on_retry=None) -> list[int]:
+            n: int | None = None, runner=run_agent, on_retry=None, report=None) -> list[int]:
     """Write proposed lessons. Focused on a track it decomposes; otherwise it prospects."""
     prompt, role, language = build_prompt(conn, cfg, track_id, n)
-    items = ask(prompt, cfg, role, runner, on_retry)
+    items = ask(prompt, cfg, role, runner, on_retry, report=report)
     ids = []
     for it in items:
         lid = conn.execute(
@@ -251,7 +341,7 @@ def _selfcheck() -> None:
 
         calls = []
 
-        def flaky(prompt, cfg, role):
+        def flaky(prompt, cfg, role, report=None):
             calls.append(prompt)
             if len(calls) == 1:
                 return "I'd suggest a few things, but here is no array."
@@ -277,7 +367,7 @@ def _selfcheck() -> None:
         # --- an agent that never complies gives up instead of looping
         cfg["agent"]["max_retries"] = 1
         try:
-            propose(conn, cfg, runner=lambda *a: "never any json")
+            propose(conn, cfg, runner=lambda *a, **k: "never any json")
             raise AssertionError("must give up")
         except CuratorError as err:
             assert "unusable output" in str(err)
@@ -286,7 +376,7 @@ def _selfcheck() -> None:
         t = conn.execute("INSERT INTO track (goal, depth) VALUES ('meshless methods', 4)").lastrowid
         seen = {}
 
-        def capture(prompt, cfg, role):
+        def capture(prompt, cfg, role, report=None):
             seen["prompt"], seen["role"] = prompt, role
             return '[{"topic": "shape parameter choice", "domain": "numerics", "depth": 4}]'
 
@@ -305,6 +395,27 @@ def _selfcheck() -> None:
         # --- and so are the candidates already waiting, or every run re-proposes the same ground
         assert "how RBF-FD builds a stencil".lower() in seen["prompt"].lower()
         conn.close()
+
+    # Streamed events from either backend fold into (text, note); everything else is noise.
+    assert _event("opencode", {"type": "text", "part": {"text": "hi"}}) == ("hi", None)
+    assert _event("opencode", {"type": "step_finish", "part": {"tokens": {"total": 42}}}) \
+        == ("", "finished, 42 tokens")
+    assert _event("opencode", {"type": "tool", "part": {"tool": "read"}}) == ("", "tool read")
+    assert _event("claude", {"type": "assistant",
+                             "message": {"content": [{"type": "text", "text": "hi"}]}}) == ("hi", None)
+    assert _event("claude", {"type": "assistant",
+                             "message": {"content": [{"type": "thinking", "thinking": ""}]}}) \
+        == ("", "thinking")
+    assert _event("claude", {"type": "system", "subtype": "hook_started"}) == ("", None), \
+        "hook chatter is not progress"
+    assert _event("claude", {"type": "result", "usage": {"input_tokens": 10, "output_tokens": 5}}) \
+        == ("", "finished, 15 tokens")
+    assert _event("opencode", {"type": "unheard_of"}) == ("", None)
+
+    assert _argv("opencode", "m", "p", streaming=True)[-2:] == ["--format", "json"]
+    assert "--output-format" in _argv("claude", "m", "p", streaming=True)
+    assert _argv("claude", "m", "p", streaming=False) == ["claude", "-p", "p", "--model", "m"], \
+        "without a reporter the call stays a plain blocking one"
 
     try:
         render("prospect", n=1)

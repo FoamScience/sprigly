@@ -282,7 +282,8 @@ def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
             ids = curator.propose(
                 conn, cfg, track, n,
                 on_retry=lambda attempt, err: status.update(
-                    f"[yellow]retry {attempt}[/yellow] [dim]{err[:60]}[/dim]"))
+                    f"[yellow]retry {attempt}[/yellow] [dim]{err[:60]}[/dim]"),
+                report=lambda msg: console.print(f"   [dim]{msg}[/dim]"))
         except curator.CuratorError as err:
             raise click.ClickException(str(err))
         finally:

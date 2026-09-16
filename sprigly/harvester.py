@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 
 
 def rank_relevance(topic: str, depth: int, works: list[Work], cfg: dict,
-                   runner=None) -> tuple[list[Work], list[tuple[Work, str]]]:
+                   runner=None, report=None) -> tuple[list[Work], list[tuple[Work, str]]]:
     """Drop sources that merely share vocabulary with the topic.
 
     The gate cannot catch these: a paper can be peer-reviewed, open access and entirely about
@@ -39,7 +39,7 @@ def rank_relevance(topic: str, depth: int, works: list[Work], cfg: dict,
                             scope=cfg["depth"][str(depth)]["scope"], candidates=listing)
     try:
         picks = curator.ask(prompt, cfg, "judgement", runner or curator.run_agent,
-                            validator=_validate_picks)
+                            validator=_validate_picks, report=report)
     except curator.CuratorError as err:
         log.warning("relevance pass unusable, keeping every source: %s", err)
         return works, []
@@ -161,7 +161,7 @@ def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None,
     say(f"{len(found)} candidates")
 
     say("ranking for relevance")
-    relevant, off_topic = rank_relevance(topic, depth, found, cfg, runner)
+    relevant, off_topic = rank_relevance(topic, depth, found, cfg, runner, report)
     admission = gate.admit(relevant, depth, cfg)
     for w, why in off_topic:
         log.info("dropped %s: %s", w.title[:60], why)
@@ -211,7 +211,7 @@ def _selfcheck() -> None:
     on_topic = work("how rbf-fd builds a stencil")
     off_topic = work("radial velocity follow-up of corot transiting exoplanets")
 
-    keep_first = lambda prompt, cfg, role: '[{"n": 1, "why": "directly on topic"}]'
+    keep_first = lambda prompt, cfg, role, report=None: '[{"n": 1, "why": "directly on topic"}]'
     kept, dropped = rank_relevance("rbf-fd stencils", depth, [on_topic, off_topic], cfg, keep_first)
     assert kept == [on_topic] and len(dropped) == 1, "an off-topic credible paper is dropped"
 

@@ -103,6 +103,11 @@ alias — and a shared field would silently break the moment the backend changed
 the bulk passes; judgement calls (syllabus decomposition, harvester relevance ranking) get a
 stronger one.
 
+Both CLIs already emit newline-delimited JSON events — `opencode run --format json`,
+`claude -p --output-format stream-json` — so watching an agent work live needs no SDK and no extra
+dependency, only the right flag and a small parser per backend. A run with a progress callback is
+streamed and narrates itself; without one it stays a plain blocking call.
+
 Output is requested as JSON and schema-checked. Agents narrate, so asking for bare JSON is
 necessary but never sufficient: the parser finds the array, tracking bracket depth and string
 escapes so that a bracketed aside in the prose does not derail it. Validation **rejects rather than
