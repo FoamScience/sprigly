@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json as _json
+import json
 import logging
 import sys
 import time
@@ -61,10 +61,19 @@ def main(ctx: click.Context, config_file) -> None:
 @main.command("config")
 @click.pass_obj
 def show_config(cfg: dict) -> None:
-    """Print the resolved configuration and paths."""
-    click.echo(f"# config file: {config.config_path()}"
-               f" ({'found' if config.config_path().is_file() else 'not present, using defaults'})")
-    click.echo(json.dumps(cfg, indent=2, default=str))
+    """Print the resolved configuration, in the format the config file itself uses."""
+    import tomli_w
+
+    path = config.config_path()
+    click.echo(f"# {path}  ({'in use' if path.is_file() else 'not present, showing defaults'})")
+    click.echo(f"# copy any section below into that file to change it\n")
+    # Paths are resolved absolute at load time and are derived, not settings, so they are shown
+    # separately as comments rather than offered as something to paste back.
+    settings = {k: v for k, v in cfg.items() if k != "paths"}
+    click.echo(tomli_w.dumps(settings).rstrip())
+    click.echo("\n# resolved paths")
+    for name, value in sorted(cfg["paths"].items()):
+        click.echo(f"#   {name:<8} {value}")
 
 
 @main.command()
@@ -236,13 +245,13 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
     choice_set = uuid.uuid4().hex[:12]
     for o in menu:
         store.log_event(conn, "offered", o.candidate.id,
-                        _json.dumps({"choice_set": choice_set, "kind": o.kind, "score": o.score,
+                        json.dumps({"choice_set": choice_set, "kind": o.kind, "score": o.score,
                                      "signals": o.signals}))
 
     for idx in _choose(menu, cfg):
         taken = menu[idx - 1]
         store.log_event(conn, "picked", taken.candidate.id,
-                        _json.dumps({"choice_set": choice_set, "kind": taken.kind}))
+                        json.dumps({"choice_set": choice_set, "kind": taken.kind}))
         if taken.kind == "new":
             conn.execute("UPDATE lesson SET state='picked', score=?, updated_at=? WHERE id=?",
                          (taken.score, store.utcnow(), taken.candidate.id))
@@ -450,13 +459,13 @@ def ask(cfg: dict, lesson_ref: str, question: tuple[str, ...]) -> None:
                 [s["local_path"] for s in srcs if s["local_path"]],
                 [s["url"] for s in srcs if not s["local_path"]], cfg)
         conn.execute("UPDATE lesson SET notebook_id=? WHERE id=?", (notebook, lesson_id))
-        store.log_event(conn, "asked", lesson_id, _json.dumps({"notebook_id": notebook}))
+        store.log_event(conn, "asked", lesson_id, json.dumps({"notebook_id": notebook}))
 
     text = " ".join(question)
     with console.status("[dim]asking[/dim]", spinner="dots"):
         answer = bridge.ask(notebook, text, cfg)
     console.print(Markdown(str(getattr(answer, "answer", None) or answer)))
-    store.log_event(conn, "asked", lesson_id, _json.dumps({"question": text}))
+    store.log_event(conn, "asked", lesson_id, json.dumps({"question": text}))
     conn.close()
 
 
@@ -479,7 +488,7 @@ def _mark_consumed(conn, lesson_id: int, via: str) -> bool:
     row = conn.execute("SELECT state FROM lesson WHERE id=?", (lesson_id,)).fetchone()
     if not row:
         raise click.ClickException(f"no lesson {lesson_id}")
-    store.log_event(conn, "consumed", lesson_id, _json.dumps({"via": via}))
+    store.log_event(conn, "consumed", lesson_id, json.dumps({"via": via}))
     if row["state"] == "ready":
         conn.execute("UPDATE lesson SET state='consumed', updated_at=? WHERE id=?",
                      (store.utcnow(), lesson_id))
@@ -540,7 +549,7 @@ def done(cfg: dict, lesson_ref: str, rating: int | None, note: str) -> None:
     lesson_id = _ref(conn, lesson_ref)
     _mark_consumed(conn, lesson_id, "done")
     store.log_event(conn, "rated", lesson_id,
-                    _json.dumps({"rating": rating, "note": note.strip() or None}))
+                    json.dumps({"rating": rating, "note": note.strip() or None}))
     click.echo(f"recorded for lesson {lesson_id}"
                + (f": rating {rating}" if rating else "")
                + (f" — {note.strip()}" if note.strip() else ""))
@@ -779,7 +788,7 @@ def notebooks(cfg: dict, prune: bool) -> None:
     ours = set()
     for r in conn.execute("SELECT payload FROM event WHERE kind IN ('generated','asked','redo')"):
         try:
-            nb = (_json.loads(r["payload"]) or {}).get("notebook_id")
+            nb = (json.loads(r["payload"]) or {}).get("notebook_id")
         except (TypeError, ValueError):
             nb = None
         if nb:
@@ -819,3 +828,49 @@ def notebooks(cfg: dict, prune: bool) -> None:
             bridge.delete(nb["id"], cfg)
             click.echo(f"  deleted {nb['id'][:8]}")
     conn.close()
+
+
+def _selfcheck() -> None:
+    """Exercise every command's wiring without touching the network.
+
+    The module self-checks cover their own logic; nothing covered this file, so a stale name in one
+    command went unnoticed until it was run by hand. `--help` on every command import-checks its
+    body, and the read-only commands are run for real against a scratch store.
+    """
+    import tempfile
+
+    from click.testing import CliRunner
+
+    runner = CliRunner()
+    commands = sorted(main.commands)
+    assert {"config", "curate", "next", "tick", "status", "quiz", "review", "ask", "play",
+            "done", "redo", "deeper", "focus", "notebooks"} <= set(commands), commands
+
+    for name in commands:
+        result = runner.invoke(main, [name, "--help"])
+        assert result.exit_code == 0, f"{name} --help: {result.output[-300:]}"
+
+    with tempfile.TemporaryDirectory() as td:
+        env = {"XDG_DATA_HOME": td, "XDG_CONFIG_HOME": td}
+        for argv in (["config"], ["status"], ["focus"], ["next"], ["review"]):
+            result = runner.invoke(main, argv, env=env, input="\n")
+            assert result.exit_code == 0, f"{argv}: {result.exception or result.output[-300:]}"
+        # The config is printed as TOML so it can be pasted straight back into the file.
+        import tomllib
+
+        printed = runner.invoke(main, ["config"], env=env).output
+        parsed = tomllib.loads("\n".join(
+            l for l in printed.splitlines() if not l.startswith("#")))
+        assert parsed["bridge"]["artifacts"] == ["audio", "video", "quiz"]
+        assert parsed["scoring"]["prereq"] == 0.25
+        assert "paths" not in parsed, "resolved paths are shown as comments, not as settings"
+
+        # An unknown reference is a message, not a traceback.
+        result = runner.invoke(main, ["status", "nothing-like-this"], env=env)
+        assert result.exit_code != 0 and "no lesson" in result.output, result.output
+
+    print("cli selfcheck ok")
+
+
+if __name__ == "__main__":
+    _selfcheck()

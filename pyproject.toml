@@ -13,6 +13,7 @@ dependencies = [
     "click",
     "rich",
     "iterfzf>=1.9.0.67.0",
+    "tomli-w>=1.2.0",
 ]
 
 [project.scripts]
