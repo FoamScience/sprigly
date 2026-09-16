@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import json as _json
 import logging
 import sys
 import time
@@ -207,8 +207,6 @@ def _why(offer, cfg: dict) -> str:
 @click.pass_obj
 def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
     """Offer the next lessons and record which one you take."""
-    import json as _json
-
     from rich.console import Console
     from rich.table import Table
 
@@ -254,13 +252,16 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
 @main.command()
 @click.option("--track", type=int, help="Decompose this track instead of prospecting.")
 @click.option("-n", type=int, help="How many lessons to ask for.")
+@click.option("--lang", help="Language for the generated material, e.g. de. Default from config.")
 @click.option("--dry-run", is_flag=True, help="Print the prompt without calling the agent.")
 @click.pass_obj
-def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
+def curate(cfg: dict, track: int | None, n: int | None, lang: str | None, dry_run: bool) -> None:
     """Ask the agent for candidate lessons."""
     from . import curator, store
 
     conn = store.connect(cfg["paths"]["db"])
+    if lang:
+        cfg = {**cfg, "lesson": {**cfg["lesson"], "default_language": lang}}
     if dry_run:
         prompt, role, _ = curator.build_prompt(conn, cfg, track, n)
         backend = cfg["agent"]["backend"]
@@ -379,8 +380,9 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
 @click.argument("lesson_id", type=int)
 @click.option("--from", "stage", type=click.Choice(["harvest", "upload"]), default="harvest",
               show_default=True, help="Which phase to run again.")
+@click.option("--lang", help="Regenerate in this language, e.g. de.")
 @click.pass_obj
-def redo(cfg: dict, lesson_id: int, stage: str) -> None:
+def redo(cfg: dict, lesson_id: int, stage: str, lang: str | None) -> None:
     """Rewind a lesson so the next tick re-runs a phase.
 
     `--from harvest` throws away its sources and brief and searches again. `--from upload` keeps the
@@ -397,7 +399,55 @@ def redo(cfg: dict, lesson_id: int, stage: str) -> None:
         state = ticker.redo(conn, cfg, lesson_id, stage)
     except ValueError as err:
         raise click.ClickException(str(err))
+    if lang:
+        conn.execute("UPDATE lesson SET language=? WHERE id=?", (lang, lesson_id))
+        click.echo(f"language set to {lang}")
     _, discarded = ticker.REDO_STAGES[stage]
     click.echo(f"lesson {lesson_id} rewound to {state}; discarded {discarded}")
     click.echo(f"run `sprigly tick --lesson {lesson_id}` to run that phase again")
+    conn.close()
+
+
+@main.command()
+@click.argument("lesson_id", type=int)
+@click.argument("question", nargs=-1, required=True)
+@click.pass_obj
+def ask(cfg: dict, lesson_id: int, question: tuple[str, ...]) -> None:
+    """Ask a question about a lesson, answered from its own sources.
+
+    Notebooks are deleted once their artifacts are downloaded, so the first question about an older
+    lesson rebuilds one from the sources still on disk. That is slower than the rest, and cheaper
+    than keeping every notebook alive against the account's cap.
+    """
+    from rich.console import Console
+    from rich.markdown import Markdown
+
+    from . import bridge, store
+
+    console = Console()
+    _echo_warnings(console)
+    conn = store.connect(cfg["paths"]["db"])
+    row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
+    if not row:
+        raise click.ClickException(f"no lesson {lesson_id}")
+
+    notebook = row["notebook_id"]
+    if not notebook or not bridge.alive(notebook, cfg):
+        srcs = conn.execute(
+            "SELECT s.local_path, s.url FROM source s JOIN lesson_source ls ON ls.source_id=s.id"
+            " WHERE ls.lesson_id=?", (lesson_id,)).fetchall()
+        if not srcs:
+            raise click.ClickException(f"lesson {lesson_id} has no sources to answer from")
+        with console.status("[dim]rebuilding the notebook from its sources[/dim]", spinner="dots"):
+            notebook = bridge.upload_only(
+                row["topic"],
+                [s["local_path"] for s in srcs if s["local_path"]],
+                [s["url"] for s in srcs if not s["local_path"]], cfg)
+        conn.execute("UPDATE lesson SET notebook_id=? WHERE id=?", (notebook, lesson_id))
+
+    text = " ".join(question)
+    with console.status("[dim]asking[/dim]", spinner="dots"):
+        answer = bridge.ask(notebook, text, cfg)
+    console.print(Markdown(str(getattr(answer, "answer", None) or answer)))
+    store.log_event(conn, "asked", lesson_id, _json.dumps({"question": text}))
     conn.close()

@@ -97,7 +97,8 @@ async def _start(topic, paths, urls, instructions, language, depth, cfg, report=
             raise
 
 
-async def _fill(c, nb, topic, paths, urls, instructions, language, depth, cfg, say) -> dict[str, Any]:
+async def _fill(c, nb, topic, paths, urls, instructions, language, depth, cfg, say,
+                generate: bool = True) -> dict[str, Any]:
     if True:
         added = []
         for p in paths:
@@ -121,6 +122,9 @@ async def _fill(c, nb, topic, paths, urls, instructions, language, depth, cfg, s
             # Generating before the sources finish indexing produces an empty artifact.
             await c.sources.wait_all_until_ready(
                 nb.id, ids, timeout=cfg["bridge"]["source_ready_timeout_seconds"])
+
+        if not generate:
+            return {"notebook_id": nb.id, "jobs": {}}
 
         jobs = {}
         for kind in cfg["bridge"]["artifacts"]:
@@ -200,6 +204,60 @@ def download(job_ref: dict, dest: Path, cfg: dict, report=None) -> list[dict[str
     return asyncio.run(_download(job_ref, dest, cfg, report))
 
 
+async def _upload_only(topic, paths, urls, cfg) -> str:
+    async with _context(cfg) as c:
+        nb = await c.notebooks.create(topic[:100])
+        try:
+            out = await _fill(c, nb, topic, paths, urls, None, "en", 3, cfg,
+                              lambda _m: None, generate=False)
+            return out["notebook_id"]
+        except Exception:
+            try:
+                await c.notebooks.delete(nb.id)
+            except Exception as err:
+                log.warning("could not remove the orphaned notebook %s: %s", nb.id, err)
+            raise
+
+
+def upload_only(topic: str, paths: list[str], urls: list[str], cfg: dict) -> str:
+    """A notebook holding the sources and nothing else, for asking questions of."""
+    return asyncio.run(_upload_only(topic, paths, urls or [], cfg))
+
+
+async def _alive(notebook_id, cfg) -> bool:
+    async with _context(cfg) as c:
+        return await c.notebooks.get_or_none(notebook_id) is not None
+
+
+def alive(notebook_id: str, cfg: dict) -> bool:
+    """Is this notebook still on the account? They are deleted after download by default."""
+    try:
+        return asyncio.run(_alive(notebook_id, cfg))
+    except Exception as err:
+        log.info("could not check notebook %s: %s", notebook_id, err)
+        return False
+
+
+async def _ask(notebook_id, question, cfg) -> Any:
+    async with _context(cfg) as c:
+        return await c.chat.ask(notebook_id, question)
+
+
+def ask(notebook_id: str, question: str, cfg: dict) -> Any:
+    """Grounded question answering against a notebook's sources."""
+    return asyncio.run(_ask(notebook_id, question, cfg))
+
+
+async def _share_url(notebook_id, cfg) -> str:
+    async with _context(cfg) as c:
+        return await c.notebooks.get_share_url(notebook_id)
+
+
+def share_url(notebook_id: str, cfg: dict) -> str:
+    """A link to open the notebook, where live audio and video sessions live."""
+    return asyncio.run(_share_url(notebook_id, cfg))
+
+
 async def _discard(job_ref, cfg) -> None:
     async with _context(cfg) as c:
         await c.notebooks.delete(job_ref["notebook_id"])
@@ -263,8 +321,11 @@ def _selfcheck() -> None:
             calls.append(f"wait:{len(ids)}")
 
         client = SimpleNamespace(
+            chat=SimpleNamespace(ask=lambda nb, q: _coro(SimpleNamespace(answer=f"answer to {q}"))),
             notebooks=SimpleNamespace(
                 create=lambda title: _coro(SimpleNamespace(id="nb-1", title=title)),
+                get_or_none=lambda nb: _coro(SimpleNamespace(id=nb) if nb == "nb-1" else None),
+                get_share_url=lambda nb, artifact_id=None: _coro(f"https://notebooklm/{nb}"),
                 delete=lambda nb: _coro(calls.append(f"delete:{nb}"))),
             sources=SimpleNamespace(add_file=add_file, add_url=add_url,
                                     wait_all_until_ready=ready_all),
@@ -293,7 +354,8 @@ def _selfcheck() -> None:
                     instructions="brief", urls=["https://example.org/v"], depth=3)
         assert job["notebook_id"] == "nb-1"
         assert set(job["jobs"]) == set(cfg["bridge"]["artifacts"])
-        assert "generate:video" not in calls, "video is opt-in, not default"
+        assert "generate:video" in calls, "the video overview is part of the default set"
+        assert "generate:slide_deck" not in calls, "slides are opt-in alongside it"
         # Each artifact is asked for with its own prompt, not one instruction reused four times.
         lengths = {c.split(":")[1]: int(c.split(":")[2]) for c in calls if c.startswith("instructions:")}
         assert len(set(lengths.values())) == len(lengths), f"prompts must differ per kind: {lengths}"
@@ -304,10 +366,10 @@ def _selfcheck() -> None:
             "sources must finish indexing before generation, or the artifact comes back empty"
         assert calls.index("wait:3") < calls.index("generate:audio")
 
-        # Turning video on is a config line, not a code change.
-        wide = {**cfg, "bridge": {**cfg["bridge"], "artifacts": ["audio", "video"]}}
+        # Which artifacts a lesson gets is a config line, not a code change.
+        wide = {**cfg, "bridge": {**cfg["bridge"], "artifacts": ["audio", "slides"]}}
         calls.clear()
-        assert set(start("x", ["/tmp/a.pdf"], wide, depth=3)["jobs"]) == {"audio", "video"}
+        assert set(start("x", ["/tmp/a.pdf"], wide, depth=3)["jobs"]) == {"audio", "slides"}
 
         assert ready(job, cfg) is True
 
@@ -324,7 +386,7 @@ def _selfcheck() -> None:
         with tempfile.TemporaryDirectory() as td:
             globals()["_context"] = fake_client()
             got = download(job, Path(td) / "lesson", cfg)
-            assert {a["kind"] for a in got} == {"audio", "slides", "quiz"}
+            assert {a["kind"] for a in got} == set(cfg["bridge"]["artifacts"])
             assert all(a["bytes"] > 0 and Path(a["path"]).exists() for a in got)
 
             # One artifact missing must not cost the lesson its audio.
@@ -348,6 +410,19 @@ def _selfcheck() -> None:
             assert "no source was accepted" in str(err)
         assert "delete:nb-1" in calls, \
             "a setup that fails after create must not strand an empty notebook on the account"
+
+        # A notebook can be rebuilt from the sources alone, with nothing generated.
+        calls.clear()
+        globals()["_context"] = fake_client()
+        nb = upload_only("x", ["/tmp/a.pdf"], ["https://example.org/v"], cfg)
+        assert nb == "nb-1"
+        assert not any(c.startswith("generate:") for c in calls), \
+            "rebuilding for a question must not spend generation quota"
+        assert "add_file:a.pdf" in calls and "add_url:https://example.org/v" in calls
+
+        assert alive("nb-1", cfg) and not alive("gone", cfg)
+        assert getattr(ask("nb-1", "why does it work?", cfg), "answer") == "answer to why does it work?"
+        assert share_url("nb-1", cfg).endswith("nb-1")
 
         # Tidying must never take down a lesson whose artifacts are already on disk.
         globals()["_context"] = fake_client()

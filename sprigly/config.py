@@ -112,10 +112,10 @@ DEFAULTS: dict[str, Any] = {
         "fetch_timeout_seconds": 30,
     },
     "bridge": {
-        # Which artifacts each lesson gets. Video is off by default: it is the slowest and by far
-        # the largest, and the slide deck already covers what audio cannot carry. Add "video" here
-        # if you want it, and mind retention_video_days.
-        "artifacts": ["audio", "slides", "quiz"],
+        # Which artifacts each lesson gets. The video overview is narrated slides, so it covers
+        # what a static deck would and adds the moving explanation; add "slides" alongside it if
+        # you also want a PDF to skim.
+        "artifacts": ["audio", "video", "quiz"],
         # Generation options, by enum name from notebooklm-py. The audio format comes from the
         # depth table instead, since it is a property of how broad the lesson is.
         "audio_length": "DEFAULT",
@@ -137,7 +137,9 @@ DEFAULTS: dict[str, Any] = {
         "backup_keep": 7,
     },
     "delivery": {
-        "retention_video_days": 30,
+        # Video is a primary artifact here, not a bulky extra, so nothing prunes it by default.
+        # Set a number of days if disk becomes the problem.
+        "retention_video_days": 0,
         "freshen_new_sources": 3,
     },
     # Relative entries resolve under the data directory; absolute ones are taken as given.

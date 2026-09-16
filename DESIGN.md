@@ -330,9 +330,11 @@ Sources must finish indexing before generation is requested, or the artifact com
 `start` waits on `wait_all_until_ready` before asking for anything — that wait is on indexing, not
 on generation, which is still polled.
 
-Which artifacts a lesson gets is a config list. **Video is off by default** — it is the slowest to
-generate and by far the largest to store, and the slide deck already carries what audio cannot.
-Turning it on is one config line, not a code change.
+Which artifacts a lesson gets is a config list: **audio, video and quiz by default**. The video
+overview is narrated slides, so it covers what a static deck would and adds the moving explanation;
+`"slides"` can be added alongside it for a PDF to skim. Because video is a primary artifact here
+rather than a bulky extra, `retention_video_days` defaults to 0 — nothing prunes it — and pruning
+stays available for when disk becomes the problem.
 
 Each artifact is asked for with **its own prompt**, from `sprigly/prompts/artifact_*.md`: what
 suits a podcast does not suit a slide deck or a quiz. The audio prompt bans throat-clearing and
@@ -424,6 +426,17 @@ Default 3.
 
 A track is **done** when it has no `proposed` lessons left and all its lessons are `reviewed`. The
 curator can be asked to extend it.
+
+### Asking a lesson a question
+
+`sprigly ask <id> "why does the shape parameter matter?"` answers from that lesson's own sources.
+Notebooks are deleted once their artifacts are downloaded, so the first question about an older
+lesson **rebuilds one from the sources still on disk** — slower than the rest, and cheaper than
+keeping every notebook alive against the account cap. The rebuild uploads and generates nothing, so
+it spends no generation quota.
+
+The same rebuilt notebook is what a live audio or video session would attach to; `notebooklm-py`
+does not expose those yet, and `notebooks.get_share_url` is already wired for when it does.
 
 ## Configuration
 
