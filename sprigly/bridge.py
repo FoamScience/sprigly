@@ -19,7 +19,53 @@ log = logging.getLogger(__name__)
 # The depth table asks for "brief" or "deep-dive"; the library wants its own enum.
 AUDIO_FORMATS = {"brief": "BRIEF", "deep-dive": "DEEP_DIVE",
                  "critique": "CRITIQUE", "debate": "DEBATE"}
-ARTIFACTS = ("audio", "slides", "quiz")
+
+# One row per artifact kind: how to ask for it, how to fetch it, and what it lands as. Adding a
+# kind is a row here plus a prompt file, not a new branch in three places.
+SPECS = {
+    "audio": {"generate": "generate_audio", "download": "download_audio",
+              "file": "podcast.m4a", "mime": "audio/mp4"},
+    "video": {"generate": "generate_video", "download": "download_video",
+              "file": "video.mp4", "mime": "video/mp4"},
+    "slides": {"generate": "generate_slide_deck", "download": "download_slide_deck",
+               "file": "slides.pdf", "mime": "application/pdf"},
+    "quiz": {"generate": "generate_quiz", "download": "download_quiz",
+             "file": "quiz.json", "mime": "application/json"},
+}
+ARTIFACTS = tuple(SPECS)
+
+
+def _enum(name: str, value: str):
+    import notebooklm
+
+    return getattr(getattr(notebooklm, name), value)
+
+
+def options(kind: str, depth: int, cfg: dict) -> dict:
+    """Generation options for one artifact kind, resolved from config to library enums."""
+    b = cfg["bridge"]
+    if kind == "audio":
+        fmt = AUDIO_FORMATS.get(cfg["depth"][str(depth)]["audio"], "DEEP_DIVE")
+        return {"audio_format": _enum("AudioFormat", fmt),
+                "audio_length": _enum("AudioLength", b["audio_length"])}
+    if kind == "slides":
+        return {"slide_format": _enum("SlideDeckFormat", b["slide_format"]),
+                "slide_length": _enum("SlideDeckLength", b["slide_length"])}
+    if kind == "video":
+        return {"video_format": _enum("VideoFormat", b["video_format"]),
+                "video_style": _enum("VideoStyle", b["video_style"])}
+    if kind == "quiz":
+        return {"quantity": _enum("QuizQuantity", b["quiz_quantity"]),
+                "difficulty": _enum("QuizDifficulty", b["quiz_difficulty"])}
+    return {}
+
+
+def instructions_for(kind: str, topic: str, depth: int, brief: str, cfg: dict) -> str:
+    """Per-artifact prompt. What suits a podcast does not suit a slide deck or a quiz."""
+    from .curator import render
+
+    return render(f"artifact_{kind}", topic=topic, depth=depth,
+                  scope=cfg["depth"][str(depth)]["scope"], brief=brief or "")
 
 
 class BridgeError(RuntimeError):
@@ -34,13 +80,12 @@ def _context(cfg: dict):
 
 
 async def _start(topic, paths, urls, instructions, language, depth, cfg, report=None) -> dict[str, Any]:
-    fmt = AUDIO_FORMATS.get(cfg["depth"][str(depth)]["audio"], "DEEP_DIVE")
     say = report or (lambda _msg: None)
     async with _context(cfg) as c:
         nb = await c.notebooks.create(topic[:100])
         say(f"notebook {nb.id}")
         try:
-            return await _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg, say)
+            return await _fill(c, nb, topic, paths, urls, instructions, language, depth, cfg, say)
         except Exception:
             # Anything that fails after create leaves an empty notebook behind, and the account
             # has a cap. Tidy up before the error propagates, then let the lesson park and retry.
@@ -52,9 +97,7 @@ async def _start(topic, paths, urls, instructions, language, depth, cfg, report=
             raise
 
 
-async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg, say) -> dict[str, Any]:
-    import notebooklm
-
+async def _fill(c, nb, topic, paths, urls, instructions, language, depth, cfg, say) -> dict[str, Any]:
     if True:
         added = []
         for p in paths:
@@ -80,14 +123,22 @@ async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg, say
                 nb.id, ids, timeout=cfg["bridge"]["source_ready_timeout_seconds"])
 
         jobs = {}
-        say("requesting audio, slides and quiz")
-        jobs["audio"] = (await c.artifacts.generate_audio(
-            nb.id, language=language, instructions=instructions,
-            audio_format=getattr(notebooklm.AudioFormat, fmt))).task_id
-        jobs["slides"] = (await c.artifacts.generate_slide_deck(
-            nb.id, language=language, instructions=instructions)).task_id
-        jobs["quiz"] = (await c.artifacts.generate_quiz(nb.id, instructions=instructions)).task_id
-        return {"notebook_id": nb.id, "jobs": {k: v for k, v in jobs.items() if v}}
+        for kind in cfg["bridge"]["artifacts"]:
+            spec = SPECS.get(kind)
+            if not spec:
+                log.warning("unknown artifact kind %r in config, skipping", kind)
+                continue
+            say(f"requesting {kind}")
+            kwargs = {"instructions": instructions_for(kind, topic, depth, instructions, cfg),
+                      **options(kind, depth, cfg)}
+            if kind != "quiz":  # the quiz endpoint takes no language
+                kwargs["language"] = language
+            status = await getattr(c.artifacts, spec["generate"])(nb.id, **kwargs)
+            if status.task_id:
+                jobs[kind] = status.task_id
+        if not jobs:
+            raise BridgeError("no artifact was requested")
+        return {"notebook_id": nb.id, "jobs": jobs}
 
 
 def start(topic: str, source_paths: list[str], cfg: dict, language: str = "en",
@@ -120,14 +171,13 @@ async def _download(job_ref, dest: Path, cfg, report=None) -> list[dict[str, Any
     say = report or (lambda _msg: None)
     dest.mkdir(parents=True, exist_ok=True)
     nb = job_ref["notebook_id"]
-    plan = [("audio", "podcast.m4a", "audio/mp4", "download_audio"),
-            ("slides", "slides.pdf", "application/pdf", "download_slide_deck"),
-            ("quiz", "quiz.json", "application/json", "download_quiz")]
     out = []
     async with _context(cfg) as c:
-        for kind, name, mime, method in plan:
-            if kind not in job_ref.get("jobs", {}):
+        for kind in job_ref.get("jobs", {}):
+            spec = SPECS.get(kind)
+            if not spec:
                 continue
+            name, mime, method = spec["file"], spec["mime"], spec["download"]
             path = dest / name
             try:
                 await getattr(c.artifacts, method)(nb, str(path))
@@ -218,17 +268,14 @@ def _selfcheck() -> None:
                 delete=lambda nb: _coro(calls.append(f"delete:{nb}"))),
             sources=SimpleNamespace(add_file=add_file, add_url=add_url,
                                     wait_all_until_ready=ready_all),
-            artifacts=SimpleNamespace(poll_status=poll,
-                                      download_audio=downloader("audio", "podcast.m4a"),
-                                      download_slide_deck=downloader("slides", "slides.pdf"),
-                                      download_quiz=downloader("quiz", "quiz.json")))
-        for kind in ("audio", "slide_deck", "quiz"):
-            name = {"slide_deck": "slides"}.get(kind, kind)
-
-            async def make(nb, _n=name, **kw):
+            artifacts=SimpleNamespace(poll_status=poll))
+        for kind, spec in SPECS.items():
+            async def make(nb, _n=kind, **kw):
                 calls.append(f"generate:{_n}")
+                calls.append(f"instructions:{_n}:{len(kw.get('instructions') or '')}")
                 return SimpleNamespace(task_id=f"t-{_n}")
-            setattr(client.artifacts, f"generate_{kind}", make)
+            setattr(client.artifacts, spec["generate"], make)
+            setattr(client.artifacts, spec["download"], downloader(kind, spec["file"]))
 
         @asynccontextmanager
         async def ctx(_cfg):
@@ -245,11 +292,22 @@ def _selfcheck() -> None:
         job = start("rbf-fd stencils", ["/tmp/a.pdf", "/tmp/b.pdf"], cfg,
                     instructions="brief", urls=["https://example.org/v"], depth=3)
         assert job["notebook_id"] == "nb-1"
-        assert set(job["jobs"]) == {"audio", "slides", "quiz"}
+        assert set(job["jobs"]) == set(cfg["bridge"]["artifacts"])
+        assert "generate:video" not in calls, "video is opt-in, not default"
+        # Each artifact is asked for with its own prompt, not one instruction reused four times.
+        lengths = {c.split(":")[1]: int(c.split(":")[2]) for c in calls if c.startswith("instructions:")}
+        assert len(set(lengths.values())) == len(lengths), f"prompts must differ per kind: {lengths}"
+        assert all(v > 200 for v in lengths.values()), "each prompt is a real instruction"
+
         assert "add_url:https://example.org/v" in calls, "urls go up alongside files"
         assert any(c.startswith("wait:") for c in calls), \
             "sources must finish indexing before generation, or the artifact comes back empty"
         assert calls.index("wait:3") < calls.index("generate:audio")
+
+        # Turning video on is a config line, not a code change.
+        wide = {**cfg, "bridge": {**cfg["bridge"], "artifacts": ["audio", "video"]}}
+        calls.clear()
+        assert set(start("x", ["/tmp/a.pdf"], wide, depth=3)["jobs"]) == {"audio", "video"}
 
         assert ready(job, cfg) is True
 

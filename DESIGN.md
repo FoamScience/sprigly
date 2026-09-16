@@ -330,6 +330,17 @@ Sources must finish indexing before generation is requested, or the artifact com
 `start` waits on `wait_all_until_ready` before asking for anything — that wait is on indexing, not
 on generation, which is still polled.
 
+Which artifacts a lesson gets is a config list. **Video is off by default** — it is the slowest to
+generate and by far the largest to store, and the slide deck already carries what audio cannot.
+Turning it on is one config line, not a code change.
+
+Each artifact is asked for with **its own prompt**, from `sprigly/prompts/artifact_*.md`: what
+suits a podcast does not suit a slide deck or a quiz. The audio prompt bans throat-clearing and
+asks for the mechanism; the slides prompt asks for what audio carries badly — equations, labelled
+diagrams, exact statements; the quiz prompt asks for questions about what breaks when an
+assumption fails, not what a term is called. All four forbid inventing figures, numbers or
+citations not in the sources. The lesson's `brief.md` is appended to each.
+
 Notebooks are **deleted after their artifacts are downloaded and verified**, keeping `notebook_id`
 on the artifact row for traceability — otherwise the account's notebook cap ends the project around
 month one. Generation is paced by `max_generations_per_day`; a quota error parks the lesson and
