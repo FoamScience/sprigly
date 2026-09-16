@@ -96,6 +96,8 @@ DEFAULTS: dict[str, Any] = {
         "thin_ratio": 0.6,
         "min_sources": 2,
         "default_min_evidence": "peer-reviewed",
+        "max_bytes": 20_000_000,
+        "fetch_timeout_seconds": 30,
     },
     "bridge": {
         "max_generations_per_day": 4,

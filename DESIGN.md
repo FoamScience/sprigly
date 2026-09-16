@@ -259,6 +259,18 @@ OA resolution order: OpenAlex `best_oa_location.pdf_url`, then an arXiv version,
 logged reason. `trafilatura` converts HTML to clean text; `yt-dlp` handles Tier C **only if** the
 bridge cannot take a video URL as a source directly — verify that in step 0.
 
+**Relevance is a separate pass from credibility, and the only one the agent runs.** The gate cannot
+catch a paper that is peer-reviewed, open access and about something else entirely: searching
+*meshfree radial basis function* on arXiv returns *Radial velocity follow-up of CoRoT transiting
+exoplanets*, which is impeccable and about exoplanets. The relevance pass **degrades open** — an
+unreachable or unusable agent keeps every source, with a note — because the gate has already
+established these are credible, and silently harvesting nothing is a worse failure than harvesting
+a few loose ones. An agent that rejects *everything* is likewise not believed.
+
+Each lesson also gets a `brief.md` written next to its sources: depth, target length, evidence
+level, any composition caveats, and the list of what was admitted. That becomes the NotebookLM
+prompt.
+
 ### 6. Evidence levels — labelling, not one universal bar
 
 "Scientifically proven" maps cleanly onto physics and numerics and poorly onto business and the

@@ -123,15 +123,22 @@ def validate(items: list) -> list[dict]:
     return out
 
 
-def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=None) -> list[dict]:
-    """Ask, validate, and on malformed output ask again with the complaint attached."""
+def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=None,
+        validator=None) -> list[dict]:
+    """Ask, validate, and on malformed output ask again with the complaint attached.
+
+    The validator is a parameter because not every prompt returns lessons — the relevance pass
+    returns index picks. Defaulting it to the lesson schema silently rejected every reply and left
+    the caller's fallback path to swallow it.
+    """
+    validator = validator or validate
     attempt, last = 0, None
     while attempt <= cfg["agent"]["max_retries"]:
         text = runner(prompt if attempt == 0 else
                       f"{prompt}\n\nYour previous reply was rejected: {last}\nReturn only the JSON array.",
                       cfg, role)
         try:
-            return validate(extract_json(text))
+            return validator(extract_json(text))
         except (CuratorError, json.JSONDecodeError) as err:
             last = str(err)
             log.warning("curator attempt %d rejected: %s", attempt + 1, last)

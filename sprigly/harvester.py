@@ -1,27 +1,217 @@
-"""Source gathering.
+"""Source gathering: search, gate, rank for relevance, fetch.
 
-Placeholder. Real implementation lands with the credibility gate and the literature adapters; the
-signature is what `tick` depends on and is not expected to change.
+The split is deliberate. The gate decides credibility from metadata, in code. The agent decides
+only relevance, among sources that already passed — it never gets a vote on rigour.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from pathlib import Path
 from typing import Any
 
+from . import curator, gate, sources
+from .sources import Work
 
-def gather(topic: str, depth: int, dest: Path, cfg: dict) -> list[dict[str, Any]]:
-    """Return source records for a topic. Fewer than `min_sources` means the topic is unsourceable."""
+log = logging.getLogger(__name__)
+
+
+def rank_relevance(topic: str, depth: int, works: list[Work], cfg: dict,
+                   runner=None) -> tuple[list[Work], list[tuple[Work, str]]]:
+    """Drop sources that merely share vocabulary with the topic.
+
+    The gate cannot catch these: a paper can be peer-reviewed, open access and entirely about
+    something else. Searching "meshfree radial basis function" on arXiv returns "Radial velocity
+    follow-up of CoRoT transiting exoplanets" — impeccable, and about exoplanets.
+
+    Degrades open. If the agent is unreachable or unusable, every source is kept and a note says
+    so: the gate has already established these are credible, and silently harvesting nothing would
+    be a worse failure than harvesting a few loose ones.
+    """
+    if not works:
+        return [], []
+    listing = "\n".join(
+        f"{i}. {w.title} — {w.venue or 'unknown venue'}, {w.year or 'n.d.'} [{w.work_type or '?'}]"
+        for i, w in enumerate(works, 1))
+    prompt = curator.render("relevance", topic=topic, depth=depth,
+                            scope=cfg["depth"][str(depth)]["scope"], candidates=listing)
+    try:
+        picks = curator.ask(prompt, cfg, "judgement", runner or curator.run_agent,
+                            validator=_validate_picks)
+    except curator.CuratorError as err:
+        log.warning("relevance pass unusable, keeping every source: %s", err)
+        return works, []
+    keep_idx = {p["n"] for p in picks if isinstance(p.get("n"), int)}
+    keep = [w for i, w in enumerate(works, 1) if i in keep_idx]
+    dropped = [(w, "off topic") for i, w in enumerate(works, 1) if i not in keep_idx]
+    return (keep or works), dropped
+
+
+def _validate_picks(items: list) -> list[dict]:
+    """The relevance pass returns index picks, not lessons, so it needs its own schema."""
+    if not isinstance(items, list):
+        raise curator.CuratorError("expected a JSON array of picks")
+    out = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict) or not isinstance(it.get("n"), int):
+            raise curator.CuratorError(f"pick {i} has no integer 'n'")
+        out.append({"n": it["n"], "why": str(it.get("why", ""))})
+    return out
+
+
+def _slug(text: str, limit: int = 60) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:limit] or "source"
+
+
+def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
+    """Pull the source down so the bridge uploads a file, not a URL.
+
+    Files beat URLs twice over: the upload is more reliable, and the lesson survives link rot.
+    """
+    import httpx
+
+    limit = cfg["sources"]["max_bytes"]
+    timeout = cfg["sources"]["fetch_timeout_seconds"]
     dest.mkdir(parents=True, exist_ok=True)
+    stem = _slug(w.title)
+
+    if w.pdf_url:
+        try:
+            with httpx.stream("GET", w.pdf_url, timeout=timeout, follow_redirects=True) as r:
+                r.raise_for_status()
+                path = dest / f"{stem}.pdf"
+                written = 0
+                with path.open("wb") as fh:
+                    for chunk in r.iter_bytes():
+                        written += len(chunk)
+                        if written > limit:
+                            log.info("%s exceeds max_bytes, abandoning", w.pdf_url)
+                            path.unlink(missing_ok=True)
+                            return None
+                        fh.write(chunk)
+            return str(path)
+        except Exception as err:
+            log.info("pdf fetch failed for %s: %s", w.pdf_url, err)
+
+    try:
+        import trafilatura
+
+        raw = trafilatura.fetch_url(w.url)
+        text = trafilatura.extract(raw) if raw else None
+    except Exception as err:
+        log.info("html extract failed for %s: %s", w.url, err)
+        text = None
+    if not text:
+        return None
+    path = dest / f"{stem}.txt"
+    path.write_text(f"# {w.title}\n\nSource: {w.url}\n\n{text[:limit]}")
+    return str(path)
+
+
+def brief(topic: str, depth: int, kept: list[Work], admission: gate.Admission, cfg: dict) -> str:
+    """The framing note that becomes the NotebookLM prompt, written next to the sources."""
+    lines = [f"# {topic}", "",
+             f"Depth {depth}: {cfg['depth'][str(depth)]['scope']}.",
+             f"Target length: {cfg['depth'][str(depth)]['audio']}.", "",
+             f"Evidence level: {admission.evidence or 'unknown'}.", ""]
+    if admission.notes:
+        lines += ["Caveats:"] + [f"- {n}" for n in admission.notes] + [""]
+    lines += ["Sources:"]
+    lines += [f"- {w.title} ({w.venue or 'unknown venue'}, {w.year or 'n.d.'})" for w in kept]
+    return "\n".join(lines) + "\n"
+
+
+def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None) -> list[dict[str, Any]]:
+    """Search, gate, rank, fetch. Returns source records for the store."""
     budget = cfg["depth"][str(depth)]["sources"]
-    return [
-        {
-            "url": f"https://example.invalid/{topic.replace(' ', '-')}/{i}",
-            "doi": None,
-            "title": f"Placeholder source {i} for {topic}",
-            "tier": "A",
-            "evidence_level": "peer-reviewed",
-            "local_path": str(dest / f"source-{i}.txt"),
-        }
-        for i in range(budget)
-    ]
+    found = sources.search(topic, limit=budget * 3, cfg=cfg)
+    log.info("harvest %r: %d candidates", topic, len(found))
+
+    relevant, off_topic = rank_relevance(topic, depth, found, cfg, runner)
+    admission = gate.admit(relevant, depth, cfg)
+    for w, why in off_topic:
+        log.info("dropped %s: %s", w.title[:60], why)
+    for w, why in admission.rejected:
+        log.info("rejected %s: %s", w.title[:60], why)
+
+    records = []
+    for w in admission.accepted:
+        tier = gate.tier_of(w, cfg)
+        records.append({
+            "url": w.url, "doi": w.doi, "title": w.title, "venue": w.venue, "year": w.year,
+            "work_type": w.work_type, "tier": tier, "evidence_level": gate.TIER_LEVEL[tier],
+            "oa_status": "oa" if w.is_oa else None, "retracted": int(w.retracted),
+            "local_path": fetch(w, dest, cfg),
+        })
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    (dest.parent / "brief.md").write_text(brief(topic, depth, admission.accepted, admission, cfg))
+    log.info("harvest %r: %d admitted, status %s", topic, len(records), admission.status)
+    return records
+
+
+def _selfcheck() -> None:
+    import tempfile
+
+    from . import config
+
+    cfg = config.load(path=Path("/nonexistent.toml"))
+    depth = 3
+
+    def work(title, **kw):
+        kw.setdefault("venue", "JCP")
+        kw.setdefault("venue_type", "journal")
+        kw.setdefault("work_type", "article")
+        kw.setdefault("is_oa", True)
+        return Work(title=title, url=f"https://example.org/{_slug(title)}",
+                    doi=f"10.1/{_slug(title)}", **kw)
+
+    on_topic = work("how rbf-fd builds a stencil")
+    off_topic = work("radial velocity follow-up of corot transiting exoplanets")
+
+    keep_first = lambda prompt, cfg, role: '[{"n": 1, "why": "directly on topic"}]'
+    kept, dropped = rank_relevance("rbf-fd stencils", depth, [on_topic, off_topic], cfg, keep_first)
+    assert kept == [on_topic] and len(dropped) == 1, "an off-topic credible paper is dropped"
+
+    # Degrade open: a broken relevance pass must not silently harvest nothing.
+    boom = lambda *a, **k: (_ for _ in ()).throw(curator.CuratorError("agent down"))
+    kept, dropped = rank_relevance("x", depth, [on_topic, off_topic], cfg, boom)
+    assert kept == [on_topic, off_topic] and dropped == [], "unreachable agent keeps everything"
+
+    keep_none = lambda *a, **k: '[{"n": 99, "why": "nothing matches"}]'
+    kept, _ = rank_relevance("x", depth, [on_topic, off_topic], cfg, keep_none)
+    assert len(kept) == 2, "an agent that rejects everything is not believed"
+
+    assert rank_relevance("x", depth, [], cfg, boom) == ([], []), "no candidates, no agent call"
+
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / "lessons" / "1" / "sources"
+        catalogue = [work(f"paper {i}") for i in range(6)] + [off_topic]
+
+        real_search, sources.search = sources.search, lambda q, limit, cfg: catalogue
+        real_fetch = globals()["fetch"]
+        globals()["fetch"] = lambda w, dest, cfg: str(dest / f"{_slug(w.title)}.pdf")
+        try:
+            keep_all = lambda *a, **k: json.dumps(
+                [{"n": i, "why": "ok"} for i in range(1, len(catalogue))])
+            got = gather("rbf-fd stencils", depth, dest, cfg, keep_all)
+        finally:
+            sources.search, globals()["fetch"] = real_search, real_fetch
+
+        assert len(got) == 6, f"six on-topic papers admitted, got {len(got)}"
+        assert all(r["tier"] == "A" and r["evidence_level"] == "peer-reviewed" for r in got)
+        assert all(r["local_path"] and r["url"] and r["title"] for r in got)
+        assert {"venue", "year", "work_type", "oa_status", "retracted"} <= set(got[0]), \
+            "the store's columns are all populated, not just the ones the gate needed"
+
+        note = (dest.parent / "brief.md").read_text()
+        assert "rbf-fd stencils" in note and "peer-reviewed" in note
+        assert "paper 0" in note and "exoplanets" not in note, \
+            "the brief lists what was admitted, not what was searched"
+
+    print("harvester selfcheck ok")
+
+
+if __name__ == "__main__":
+    _selfcheck()

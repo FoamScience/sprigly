@@ -80,8 +80,12 @@ def _do_harvesting(conn, row, cfg) -> str:
     found = harvester.gather(row["topic"], row["depth"], dest, cfg)
     for s in found:
         conn.execute(
-            "INSERT OR IGNORE INTO source (url, doi, title, tier, evidence_level, local_path)"
-            " VALUES (:url,:doi,:title,:tier,:evidence_level,:local_path)", s)
+            "INSERT OR IGNORE INTO source (url, doi, title, venue, year, work_type, tier,"
+            " evidence_level, oa_status, retracted, local_path)"
+            " VALUES (:url,:doi,:title,:venue,:year,:work_type,:tier,:evidence_level,"
+            ":oa_status,:retracted,:local_path)",
+            {"venue": None, "year": None, "work_type": None, "oa_status": None,
+             "retracted": 0, "doi": None, "local_path": None, **s})
         sid = conn.execute("SELECT id FROM source WHERE url=?", (s["url"],)).fetchone()[0]
         conn.execute("INSERT OR IGNORE INTO lesson_source VALUES (?,?)", (row["id"], sid))
 
@@ -193,6 +197,16 @@ def _selfcheck() -> None:
         cfg["bridge"]["retry_backoff_seconds"] = 0
         conn = store.connect(cfg["paths"]["db"])
 
+        # The real harvester searches the internet; this check stays offline.
+        def fake_gather(topic, depth, dest, cfg, runner=None):
+            dest.mkdir(parents=True, exist_ok=True)
+            return [{"url": f"https://example.org/{topic.replace(' ', '-')}/{i}",
+                     "title": f"source {i}", "tier": "A", "evidence_level": "peer-reviewed",
+                     "local_path": str(dest / f"source-{i}.txt")}
+                    for i in range(cfg["depth"][str(depth)]["sources"])]
+
+        real_gather, harvester.gather = harvester.gather, fake_gather
+
         def add(topic="rbf-fd stencils", state="picked", **kw):
             cols = {"topic": topic, "state": state, **kw}
             keys = ",".join(cols)
@@ -265,22 +279,22 @@ def _selfcheck() -> None:
         cfg["bridge"]["max_generations_per_day"] = 99
 
         # Too few sources is not a failure either; the topic is simply unsourceable.
-        real_gather, harvester.gather = harvester.gather, lambda *a, **k: []
+        saved, harvester.gather = harvester.gather, lambda *a, **k: []
         try:
             l7 = add("nonexistent topic")
             run(conn, cfg)
             assert state_of(l7) == "unsourced"
         finally:
-            harvester.gather = real_gather
+            harvester.gather = saved
 
         # Thin flag when the gate yields under the ratio, but still enough to generate.
-        real_gather, harvester.gather = harvester.gather, lambda t, d, dest, c: real_gather(t, d, dest, c)[:3]
+        saved, harvester.gather = harvester.gather, lambda t, d, dest, c: saved(t, d, dest, c)[:3]
         try:
             l8 = add("sparse topic")
             run(conn, cfg)
             assert conn.execute("SELECT thin FROM lesson WHERE id=?", (l8,)).fetchone()[0] == 1
         finally:
-            harvester.gather = real_gather
+            harvester.gather = saved
 
         # Stale candidates expire.
         old = (datetime.now(timezone.utc) - timedelta(days=99)).strftime(TS)
@@ -292,6 +306,7 @@ def _selfcheck() -> None:
         kinds = {r[0] for r in conn.execute("SELECT DISTINCT kind FROM event")}
         assert {"generated", "ready", "failed", "unsourced", "expired"} <= kinds
 
+        harvester.gather = real_gather
         conn.close()
 
         # The lock keeps overlapping timer runs out.
