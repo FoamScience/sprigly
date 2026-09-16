@@ -102,10 +102,17 @@ def _do_harvesting(conn, row, cfg) -> str:
 def _do_uploading(conn, row, cfg) -> str:
     if _generated_today(conn) >= cfg["bridge"]["max_generations_per_day"]:
         return "uploading"  # quota spent; try again tomorrow, no retry counted against it
-    paths = [r["local_path"] for r in conn.execute(
-        "SELECT s.local_path FROM source s JOIN lesson_source ls ON ls.source_id=s.id"
-        " WHERE ls.lesson_id=? AND s.local_path IS NOT NULL", (row["id"],))]
-    job = bridge.start(row["topic"], paths, cfg, language=row["language"])
+    rows = conn.execute(
+        "SELECT s.local_path, s.url FROM source s JOIN lesson_source ls ON ls.source_id=s.id"
+        " WHERE ls.lesson_id=?", (row["id"],)).fetchall()
+    paths = [r["local_path"] for r in rows if r["local_path"]]
+    # Anything that could not be downloaded still goes up as a URL — the bridge accepts both, which
+    # is also why Tier C video needs no separate downloader.
+    urls = [r["url"] for r in rows if not r["local_path"]]
+    note = _lesson_dir(cfg, row["id"]) / "brief.md"
+    job = bridge.start(row["topic"], paths, cfg, language=row["language"],
+                       instructions=note.read_text() if note.exists() else None,
+                       urls=urls, depth=row["depth"])
     _set(conn, row["id"], state="generating", job_ref=json.dumps(job),
          notebook_id=job.get("notebook_id"), polled_at=utcnow())
     store.log_event(conn, "generated", row["id"], json.dumps(job))

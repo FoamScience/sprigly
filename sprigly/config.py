@@ -103,6 +103,8 @@ DEFAULTS: dict[str, Any] = {
         "max_generations_per_day": 4,
         "keep_notebooks": False,
         "poll_seconds": 60,
+        "client_timeout_seconds": 60.0,
+        "source_ready_timeout_seconds": 300.0,
         "max_retries": 5,
         "retry_backoff_seconds": 60,
     },

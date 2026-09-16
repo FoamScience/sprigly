@@ -302,7 +302,16 @@ notebooklm auth refresh --quiet                   # from the same timer as tick
 ```
 
 Master-token auth mints fresh cookies on demand with no browser per session, which is what makes
-unattended ticks viable. One `asyncio.run()` at the bridge boundary; the click app stays sync.
+unattended ticks viable. The library is async and the rest of Sprigly is not, so there is one
+`asyncio.run()` per call at this boundary and the click app stays plain synchronous code.
+
+**Sources go up as files *or* URLs** — `sources.add_url` exists, so anything the harvester could not
+download is still uploaded by link, and Tier C video needs no separate downloader. `yt-dlp` is
+therefore not a dependency after all.
+
+Sources must finish indexing before generation is requested, or the artifact comes back empty, so
+`start` waits on `wait_all_until_ready` before asking for anything — that wait is on indexing, not
+on generation, which is still polled.
 
 Notebooks are **deleted after their artifacts are downloaded and verified**, keeping `notebook_id`
 on the artifact row for traceability — otherwise the account's notebook cap ends the project around
@@ -408,7 +417,6 @@ One TOML file. Everything below is a knob, and none of it is a code change:
 | Spaced repetition | `fsrs` |
 | Literature metadata | `pyalex` (OpenAlex), `habanero` (Crossref), `arxiv` |
 | URL to clean text | `trafilatura` |
-| Video sources | `yt-dlp`, only if the bridge cannot take a URL directly |
 | CLI / output / HTTP | `click`, `rich`, `httpx` — already transitive deps of `notebooklm-py` |
 | Fuzzy picking | `iterfzf` — ships the `fzf` binary in the wheel, so nothing to install separately |
 | Store | stdlib `sqlite3` |
