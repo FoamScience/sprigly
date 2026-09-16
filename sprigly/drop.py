@@ -202,6 +202,8 @@ def _selfcheck() -> None:
                          " VALUES (?,?,?,?)", (l2, kind, str(d2 / name), "2020-01-01T00:00:00Z"))
         project(conn, cfg, l2)
         assert media_left(cfg, l2, "old") == 2
+        assert prune_video(conn, cfg) == 0, "retention of 0 days means never prune"
+        cfg["delivery"]["retention_video_days"] = 30
         assert prune_video(conn, cfg) == 1
         assert media_left(cfg, l2, "old") == 1, "the video goes, the audio stays"
         assert not (d2 / "video.mp4").exists() and (d2 / "podcast.m4a").exists()
