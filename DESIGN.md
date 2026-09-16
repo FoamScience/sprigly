@@ -163,8 +163,10 @@ weighted sum of:
 - **track debt** — stale tracks get a boost, which is also what keeps several active tracks
   advancing fairly with no scheduler
 - **effort fit** — `est_minutes` against the day's budget. That is the curator's guess, because
-  scoring happens before generation; `actual_minutes` is written afterwards from the audio artifact
-  and never overwrites it. Keeping both is what leaves any evidence of how wrong the estimate was
+  scoring happens before generation; `actual_minutes` is written afterwards from the artifact's own
+  `duration_seconds` and never overwrites it. Keeping both is what leaves any evidence of how wrong
+  the estimate was. The lesson's length is its **audio** — a video overview is a condensed
+  companion, so it is only the fallback when no audio was generated
 - **revealed preference** — a Beta(1,1) posterior per domain, **sampled rather than averaged**. That
   is Thompson sampling: principled exploration for one line, no epsilon to tune, and it stops a
   domain skipped twice from sinking permanently.

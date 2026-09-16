@@ -381,10 +381,11 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
     arts = conn.execute("SELECT kind, path, mime, bytes, duration FROM artifact"
                         " WHERE lesson_id=? ORDER BY kind", (lesson_id,)).fetchall()
     if arts:
-        table = Table("kind", "size", "mime", "path", title="artifacts")
+        table = Table("kind", "size", "length", "mime", "path", title="artifacts")
         for a in arts:
-            table.add_row(a["kind"], f"{(a['bytes'] or 0) // 1024}k", a["mime"] or "-",
-                          str(a["path"]))
+            secs = a["duration"]
+            table.add_row(a["kind"], f"{(a['bytes'] or 0) // 1024}k",
+                          f"{secs / 60:.0f}m" if secs else "-", a["mime"] or "-", str(a["path"]))
         console.print(table)
 
     if row["job_ref"]:

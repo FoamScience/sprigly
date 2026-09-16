@@ -147,7 +147,9 @@ def _do_generating(conn, row, cfg, report=None) -> str:
             " VALUES (?,?,?,?,?,?,?)",
             (row["id"], a["kind"], a["path"], a.get("mime"), a.get("bytes"), a.get("duration"),
              a.get("notebook_id")))
-        if a["kind"] == "audio" and a.get("duration"):
+        # Audio is the lesson's length; a video overview is a condensed companion, so it is only
+        # the fallback when audio was not generated at all.
+        if a.get("duration") and (a["kind"] == "audio" or (actual is None and a["kind"] == "video")):
             actual = round(a["duration"] / 60)
     # The curator's estimate is what scoring saw before generation; keep it, and record what the
     # lesson actually turned out to be. Overwriting the estimate would erase the only evidence of
@@ -317,7 +319,8 @@ def _selfcheck() -> None:
         def fake_download(job, dest, cfg, report=None):
             dest.mkdir(parents=True, exist_ok=True)
             out = []
-            for kind, name, mime, secs in (("audio", "podcast.m4a", "audio/mp4", 1380.0),
+            for kind, name, mime, secs in (("video", "video.mp4", "video/mp4", 467.0),
+                                           ("audio", "podcast.m4a", "audio/mp4", 1380.0),
                                            ("slides", "slides.pdf", "application/pdf", None)):
                 (dest / name).write_text(f"stub {kind}")
                 out.append({"kind": kind, "path": str(dest / name), "mime": mime,
@@ -347,9 +350,10 @@ def _selfcheck() -> None:
         assert json.loads(conn.execute("SELECT job_ref FROM lesson WHERE id=?", (lid,)).fetchone()[0])["notebook_id"]
         run(conn, cfg)
         assert state_of(lid) == "ready", "generation is polled, not waited on"
-        assert conn.execute("SELECT count(*) FROM artifact WHERE lesson_id=?", (lid,)).fetchone()[0] == 2
+        assert conn.execute("SELECT count(*) FROM artifact WHERE lesson_id=?", (lid,)).fetchone()[0] == 3
         got = conn.execute("SELECT est_minutes, actual_minutes FROM lesson WHERE id=?", (lid,)).fetchone()
-        assert got["actual_minutes"] == 23, "actual length comes from the audio artifact"
+        assert got["actual_minutes"] == 23, \
+            "the lesson's length is its audio, not the shorter video companion"
         assert got["est_minutes"] is None, "the estimate is never overwritten by the actual"
         assert conn.execute("SELECT count(*) FROM lesson_source WHERE lesson_id=?", (lid,)).fetchone()[0] == 10
 
