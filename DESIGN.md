@@ -348,10 +348,17 @@ diagrams, exact statements; the quiz prompt asks for questions about what breaks
 assumption fails, not what a term is called. All four forbid inventing figures, numbers or
 citations not in the sources. The lesson's `brief.md` is appended to each.
 
-Notebooks are **deleted after their artifacts are downloaded and verified**, keeping `notebook_id`
-on the artifact row for traceability — otherwise the account's notebook cap ends the project around
-month one. Generation is paced by `max_generations_per_day`; a quota error parks the lesson and
-retries the next day rather than failing it.
+**Sprigly never deletes a notebook on its own.** Deleting something on the user's Google account is
+not a decision a background timer gets to make — not after a download, not when a redo abandons
+one, not even when a failed setup leaves an empty one behind. `notebook_id` stays on the lesson and
+the artifact row, and `sprigly notebooks` lists what exists and which lesson uses it;
+`--prune` offers the unused ones for deletion one at a time, each with a confirmation.
+
+Accounts do have a notebook cap. Reaching it is a prompt to prune, not a licence to delete
+unattended. `bridge.delete_notebooks` can be turned on for anyone who wants the old behaviour.
+
+Generation is paced by `max_generations_per_day`; a quota error parks the lesson and retries the
+next day rather than failing it.
 
 Any library or API error parks the lesson with its error text for retry, never aborts the tick.
 

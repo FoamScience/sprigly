@@ -87,13 +87,11 @@ async def _start(topic, paths, urls, instructions, language, depth, cfg, report=
         try:
             return await _fill(c, nb, topic, paths, urls, instructions, language, depth, cfg, say)
         except Exception:
-            # Anything that fails after create leaves an empty notebook behind, and the account
-            # has a cap. Tidy up before the error propagates, then let the lesson park and retry.
-            try:
-                await c.notebooks.delete(nb.id)
-                log.info("removed the empty notebook %s after a failed setup", nb.id)
-            except Exception as err:
-                log.warning("could not remove the orphaned notebook %s: %s", nb.id, err)
+            # The notebook is left behind deliberately. It is empty and useless, but it is on the
+            # user's account, and deleting anything there without being asked is not ours to do.
+            # `sprigly notebooks --prune` offers it for removal.
+            log.warning("notebook %s was created but not filled; "
+                        "remove it with `sprigly notebooks --prune` if you want it gone", nb.id)
             raise
 
 
@@ -265,13 +263,32 @@ async def _discard(job_ref, cfg) -> None:
         await c.notebooks.delete(job_ref["notebook_id"])
 
 
-def discard(job_ref: dict, cfg: dict) -> None:
-    """Delete the notebook once its artifacts are safely downloaded.
+def delete(notebook_id: str, cfg: dict) -> None:
+    """Delete one notebook. Only ever called because someone asked for it."""
+    asyncio.run(_discard({"notebook_id": notebook_id}, cfg))
 
-    Accounts have a notebook cap. Without this the project stops working after a few weeks, and the
-    failure looks like a generation error rather than a housekeeping one.
+
+async def _listing(cfg) -> list:
+    async with _context(cfg) as c:
+        out = []
+        for nb in await c.notebooks.list():
+            ids = await c.notebooks.get_source_ids(nb.id)
+            out.append({"id": nb.id, "title": getattr(nb, "title", ""), "sources": len(ids)})
+        return out
+
+
+def listing(cfg: dict) -> list[dict]:
+    """Every notebook on the account, with how many sources each holds."""
+    return asyncio.run(_listing(cfg))
+
+
+def discard(job_ref: dict, cfg: dict) -> None:
+    """Delete the notebook after download — only when explicitly configured to.
+
+    Off by default. Accounts do have a notebook cap, but reaching it is a prompt to prune, not a
+    licence to delete someone's data unattended.
     """
-    if cfg["bridge"]["keep_notebooks"]:
+    if not cfg["bridge"]["delete_notebooks"]:
         return
     try:
         asyncio.run(_discard(job_ref, cfg))
@@ -410,8 +427,8 @@ def _selfcheck() -> None:
             raise AssertionError("a notebook with no accepted source must not generate")
         except BridgeError as err:
             assert "no source was accepted" in str(err)
-        assert "delete:nb-1" in calls, \
-            "a setup that fails after create must not strand an empty notebook on the account"
+        assert "delete:nb-1" not in calls, \
+            "a failed setup leaves its empty notebook for the user to decide about"
 
         # A notebook can be rebuilt from the sources alone, with nothing generated.
         calls.clear()
@@ -428,8 +445,12 @@ def _selfcheck() -> None:
 
         # Tidying must never take down a lesson whose artifacts are already on disk.
         globals()["_context"] = fake_client()
+        calls.clear()
         discard({"notebook_id": "nb-1"}, cfg)
-        discard({"notebook_id": "missing"}, {**cfg, "bridge": {**cfg["bridge"], "keep_notebooks": True}})
+        assert "delete:nb-1" not in calls, "nothing is deleted unless explicitly configured"
+        discard({"notebook_id": "nb-1"},
+                {**cfg, "bridge": {**cfg["bridge"], "delete_notebooks": True}})
+        assert "delete:nb-1" in calls, "and it still works when it is"
     finally:
         globals()["_context"] = real_ctx
 

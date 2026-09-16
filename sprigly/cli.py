@@ -734,3 +734,52 @@ def deeper(cfg: dict, lesson_id: int, n: int | None) -> None:
     console.print(f"[green]✓[/green] {len(ids)} finer lessons under {lesson_id}"
                   f" — run `sprigly next` to pick one")
     conn.close()
+
+
+@main.command()
+@click.option("--prune", is_flag=True, help="Offer unused notebooks for deletion, one at a time.")
+@click.pass_obj
+def notebooks(cfg: dict, prune: bool) -> None:
+    """List the notebooks on your NotebookLM account and which lesson uses each.
+
+    Sprigly never deletes a notebook on its own. Generating a lesson leaves one behind, and a redo
+    abandons one; both stay until you say otherwise here.
+    """
+    from rich.console import Console
+    from rich.table import Table
+
+    from . import bridge, store
+
+    console = Console()
+    conn = store.connect(cfg["paths"]["db"])
+    used = {r["notebook_id"]: r["id"] for r in conn.execute(
+        "SELECT id, notebook_id FROM lesson WHERE notebook_id IS NOT NULL")}
+
+    with console.status("[dim]listing notebooks[/dim]", spinner="dots"):
+        rows = bridge.listing(cfg)
+
+    table = Table("notebook", "sources", "lesson", "title")
+    for nb in rows:
+        lesson = used.get(nb["id"])
+        table.add_row(nb["id"][:8], str(nb["sources"]),
+                      str(lesson) if lesson else "[yellow]unused[/yellow]", nb["title"][:52])
+    console.print(table)
+
+    unused = [nb for nb in rows if nb["id"] not in used]
+    if not prune:
+        if unused:
+            console.print(f"[dim]{len(unused)} not used by any lesson — "
+                          f"`sprigly notebooks --prune` to review them[/dim]")
+        conn.close()
+        return
+    if not unused:
+        console.print("[dim]every notebook belongs to a lesson[/dim]")
+        conn.close()
+        return
+
+    for nb in unused:
+        label = f"{nb['title'][:48] or '(untitled)'} — {nb['sources']} sources"
+        if click.confirm(f"delete {nb['id'][:8]}  {label}?", default=False):
+            bridge.delete(nb["id"], cfg)
+            click.echo(f"  deleted {nb['id'][:8]}")
+    conn.close()

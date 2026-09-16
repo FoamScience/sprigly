@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import shutil
 from collections import Counter
 from contextlib import contextmanager
@@ -20,6 +21,8 @@ from pathlib import Path
 
 from . import bridge, drop, harvester, store
 from .store import TS, utcnow
+
+log = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -151,8 +154,7 @@ def _do_generating(conn, row, cfg, report=None) -> str:
     # how wrong it was.
     if actual:
         _set(conn, row["id"], actual_minutes=actual)
-    if not cfg["bridge"]["keep_notebooks"]:
-        bridge.discard(job, cfg)
+    bridge.discard(job, cfg)
     _set(conn, row["id"], state="ready", polled_at=utcnow())
     store.log_event(conn, "ready", row["id"])
     out = drop.project(conn, cfg, row["id"])
@@ -206,12 +208,11 @@ def redo(conn, cfg, lesson_id: int, stage: str) -> str:
         raise ValueError(f"unknown stage {stage!r}, expected one of {sorted(REDO_STAGES)}")
     state, _ = REDO_STAGES[stage]
 
-    if row["job_ref"]:
-        # Leaving the old notebook behind would burn the account's cap one redo at a time.
-        try:
-            bridge.discard(json.loads(row["job_ref"]), cfg)
-        except Exception as err:
-            log.warning("could not discard the previous notebook: %s", err)
+    if row["notebook_id"]:
+        # Detached, not deleted. A redo abandons the old notebook, but removing it from the
+        # account is the user's call — `sprigly notebooks --prune` lists what is no longer used.
+        log.info("lesson %s no longer uses notebook %s; "
+                 "`sprigly notebooks --prune` can remove it", lesson_id, row["notebook_id"])
 
     lesson_dir = _lesson_dir(cfg, lesson_id)
     for a in conn.execute("SELECT path FROM artifact WHERE lesson_id=?", (lesson_id,)):

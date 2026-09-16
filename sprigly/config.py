@@ -126,7 +126,10 @@ DEFAULTS: dict[str, Any] = {
         "quiz_quantity": "STANDARD",
         "quiz_difficulty": "MEDIUM",
         "max_generations_per_day": 4,
-        "keep_notebooks": False,
+        # Sprigly never deletes a notebook on its own. Deleting something on your Google account
+        # is not a decision a background timer gets to make, so cleanup is `sprigly notebooks
+        # --prune`, which asks first. Set this true only if you want unattended deletion.
+        "delete_notebooks": False,
         "poll_seconds": 60,
         "client_timeout_seconds": 60.0,
         "source_ready_timeout_seconds": 300.0,
