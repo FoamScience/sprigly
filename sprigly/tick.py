@@ -131,7 +131,7 @@ def _do_uploading(conn, row, cfg, report=None) -> str:
                        urls=urls, depth=row["depth"], report=report, artifacts=wanted)
     _set(conn, row["id"], state="generating", job_ref=json.dumps(job),
          notebook_id=job.get("notebook_id"), polled_at=utcnow())
-    store.log_event(conn, "generated", row["id"], json.dumps(job))
+    store.log_event(conn, "generated", row["id"], json.dumps(job))  # carries notebook_id
     return "generating"
 
 

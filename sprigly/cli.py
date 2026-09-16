@@ -445,6 +445,7 @@ def ask(cfg: dict, lesson_id: int, question: tuple[str, ...]) -> None:
                 [s["local_path"] for s in srcs if s["local_path"]],
                 [s["url"] for s in srcs if not s["local_path"]], cfg)
         conn.execute("UPDATE lesson SET notebook_id=? WHERE id=?", (notebook, lesson_id))
+        store.log_event(conn, "asked", lesson_id, _json.dumps({"notebook_id": notebook}))
 
     text = " ".join(question)
     with console.status("[dim]asking[/dim]", spinner="dots"):
@@ -754,26 +755,43 @@ def notebooks(cfg: dict, prune: bool) -> None:
     conn = store.connect(cfg["paths"]["db"])
     used = {r["notebook_id"]: r["id"] for r in conn.execute(
         "SELECT id, notebook_id FROM lesson WHERE notebook_id IS NOT NULL")}
+    # Every notebook sprigly has ever created, from the event log. Anything outside this set was
+    # made by the user, and pruning must never offer it: "not used by a lesson" is not the same as
+    # "ours to delete".
+    ours = set()
+    for r in conn.execute("SELECT payload FROM event WHERE kind IN ('generated','asked','redo')"):
+        try:
+            nb = (_json.loads(r["payload"]) or {}).get("notebook_id")
+        except (TypeError, ValueError):
+            nb = None
+        if nb:
+            ours.add(nb)
+    ours |= set(used)
 
     with console.status("[dim]listing notebooks[/dim]", spinner="dots"):
         rows = bridge.listing(cfg)
 
-    table = Table("notebook", "sources", "lesson", "title")
+    table = Table("notebook", "sources", "owner", "title")
     for nb in rows:
         lesson = used.get(nb["id"])
-        table.add_row(nb["id"][:8], str(nb["sources"]),
-                      str(lesson) if lesson else "[yellow]unused[/yellow]", nb["title"][:52])
+        if lesson:
+            owner = f"lesson {lesson}"
+        elif nb["id"] in ours:
+            owner = "[yellow]sprigly, unused[/yellow]"
+        else:
+            owner = "[dim]yours[/dim]"
+        table.add_row(nb["id"][:8], str(nb["sources"]), owner, nb["title"][:48])
     console.print(table)
 
-    unused = [nb for nb in rows if nb["id"] not in used]
+    unused = [nb for nb in rows if nb["id"] in ours and nb["id"] not in used]
     if not prune:
         if unused:
-            console.print(f"[dim]{len(unused)} not used by any lesson — "
+            console.print(f"[dim]{len(unused)} created by sprigly and no longer used — "
                           f"`sprigly notebooks --prune` to review them[/dim]")
         conn.close()
         return
     if not unused:
-        console.print("[dim]every notebook belongs to a lesson[/dim]")
+        console.print("[dim]nothing of sprigly's is unused; your own notebooks are never offered[/dim]")
         conn.close()
         return
 
