@@ -22,7 +22,11 @@ what makes unattended runs work. That token is a **full-account Google credentia
 API key — it lives in `~/.notebooklm/`, outside this repo. Do not move or commit it.
 
 Configuration is read from `$XDG_CONFIG_HOME/sprigly/config.toml`, absent by default; data lives
-under `$XDG_DATA_HOME/sprigly/`. `sprigly config` prints what is in effect.
+under `$XDG_DATA_HOME/sprigly/`. `sprigly config` prints what is in effect as TOML, so any section
+can be pasted straight into that file to override it.
+
+Installing as a tool (`uv tool install --editable .`) gives it its own environment, so after a
+dependency changes, re-run that command with `--reinstall`.
 
 ```bash
 sprigly config                # resolved settings and paths

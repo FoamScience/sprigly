@@ -61,10 +61,19 @@ def main(ctx: click.Context, config_file) -> None:
 @main.command("config")
 @click.pass_obj
 def show_config(cfg: dict) -> None:
-    """Print the resolved configuration and paths."""
-    click.echo(f"# config file: {config.config_path()}"
-               f" ({'found' if config.config_path().is_file() else 'not present, using defaults'})")
-    click.echo(json.dumps(cfg, indent=2, default=str))
+    """Print the resolved configuration, in the format the config file itself uses."""
+    import tomli_w
+
+    path = config.config_path()
+    click.echo(f"# {path}  ({'in use' if path.is_file() else 'not present, showing defaults'})")
+    click.echo(f"# copy any section below into that file to change it\n")
+    # Paths are resolved absolute at load time and are derived, not settings, so they are shown
+    # separately as comments rather than offered as something to paste back.
+    settings = {k: v for k, v in cfg.items() if k != "paths"}
+    click.echo(tomli_w.dumps(settings).rstrip())
+    click.echo("\n# resolved paths")
+    for name, value in sorted(cfg["paths"].items()):
+        click.echo(f"#   {name:<8} {value}")
 
 
 @main.command()
@@ -846,7 +855,15 @@ def _selfcheck() -> None:
         for argv in (["config"], ["status"], ["focus"], ["next"], ["review"]):
             result = runner.invoke(main, argv, env=env, input="\n")
             assert result.exit_code == 0, f"{argv}: {result.exception or result.output[-300:]}"
-        assert '"artifacts"' in runner.invoke(main, ["config"], env=env).output
+        # The config is printed as TOML so it can be pasted straight back into the file.
+        import tomllib
+
+        printed = runner.invoke(main, ["config"], env=env).output
+        parsed = tomllib.loads("\n".join(
+            l for l in printed.splitlines() if not l.startswith("#")))
+        assert parsed["bridge"]["artifacts"] == ["audio", "video", "quiz"]
+        assert parsed["scoring"]["prereq"] == 0.25
+        assert "paths" not in parsed, "resolved paths are shown as comments, not as settings"
 
         # An unknown reference is a message, not a traceback.
         result = runner.invoke(main, ["status", "nothing-like-this"], env=env)
