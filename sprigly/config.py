@@ -28,6 +28,9 @@ DEFAULTS: dict[str, Any] = {
         },
         "max_retries": 2,
         "timeout_seconds": 600,
+        # The relevance pass degrades open, so waiting the full budget only to keep everything is
+        # wasted time. It gets a shorter leash than a curate call, whose output cannot be guessed.
+        "relevance_timeout_seconds": 180,
     },
     "lesson": {
         "default_language": "en",
@@ -96,6 +99,13 @@ DEFAULTS: dict[str, Any] = {
         "thin_ratio": 0.6,
         "min_sources": 2,
         "default_min_evidence": "peer-reviewed",
+        # No adapter may stall a harvest indefinitely.
+        "http_timeout_seconds": 30.0,
+        # How many candidates the relevance agent is asked to judge in one prompt. The gate bounds
+        # the final count anyway, and a long listing is what a small model chokes on.
+        "rank_limit": 20,
+        # Source downloads are independent and mostly waiting, so they run together.
+        "fetch_workers": 6,
         "max_bytes": 20_000_000,
         # Below this many characters an extraction is a landing page, not a paper.
         "min_text_bytes": 6_000,

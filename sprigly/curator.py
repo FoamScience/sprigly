@@ -136,7 +136,8 @@ def _describe(blob: str) -> str | None:
     return None
 
 
-def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
+def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None,
+              timeout: float | None = None) -> str:
     """Shell out to whichever agent CLI is configured. No SDK; the prompt is the product.
 
     With a `report` callback the run is streamed, so a several-minute agent call shows what it is
@@ -151,15 +152,15 @@ def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
     argv = _argv(backend, model, prompt, streaming=bool(report))
     if not shutil.which(argv[0]):
         raise CuratorError(f"{argv[0]} is not on PATH")
+    limit = timeout or a["timeout_seconds"]
 
     if not report:
         try:
-            done = subprocess.run(argv, capture_output=True, text=True,
-                                  timeout=a["timeout_seconds"])
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=limit)
         except subprocess.TimeoutExpired:
             # Every caller handles CuratorError; a raw TimeoutExpired escapes those handlers and
             # takes the whole lesson down instead of degrading.
-            raise CuratorError(f"{argv[0]} exceeded {a['timeout_seconds']}s") from None
+            raise CuratorError(f"{argv[0]} exceeded {limit:.0f}s") from None
         except OSError as err:
             raise CuratorError(f"could not run {argv[0]}: {err}") from None
         if done.returncode != 0:
@@ -167,7 +168,7 @@ def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
         return done.stdout
 
     report(f"asking {backend} {model}")
-    deadline = time.monotonic() + a["timeout_seconds"]
+    deadline = time.monotonic() + limit
     collected, shown, described = [], 0, 0
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             bufsize=1)
@@ -175,7 +176,7 @@ def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
         for line in proc.stdout:
             if time.monotonic() > deadline:
                 proc.kill()
-                raise CuratorError(f"{argv[0]} exceeded {a['timeout_seconds']}s")
+                raise CuratorError(f"{argv[0]} exceeded {limit:.0f}s")
             line = line.strip()
             if not line.startswith("{"):
                 continue
@@ -276,7 +277,7 @@ def validate(items: list) -> list[dict]:
 
 
 def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=None,
-        validator=None, report=None) -> list[dict]:
+        validator=None, report=None, timeout: float | None = None) -> list[dict]:
     """Ask, validate, and on malformed output ask again with the complaint attached.
 
     The validator is a parameter because not every prompt returns lessons — the relevance pass
@@ -288,7 +289,7 @@ def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=N
     while attempt <= cfg["agent"]["max_retries"]:
         text = runner(prompt if attempt == 0 else
                       f"{prompt}\n\nYour previous reply was rejected: {last}\nReturn only the JSON array.",
-                      cfg, role, report=report)
+                      cfg, role, report=report, timeout=timeout)
         try:
             return validator(extract_json(text))
         except (CuratorError, json.JSONDecodeError) as err:
@@ -403,7 +404,7 @@ def _selfcheck() -> None:
 
         calls = []
 
-        def flaky(prompt, cfg, role, report=None):
+        def flaky(prompt, cfg, role, report=None, timeout=None):
             calls.append(prompt)
             if len(calls) == 1:
                 return "I'd suggest a few things, but here is no array."
@@ -438,7 +439,7 @@ def _selfcheck() -> None:
         t = conn.execute("INSERT INTO track (goal, depth) VALUES ('meshless methods', 4)").lastrowid
         seen = {}
 
-        def capture(prompt, cfg, role, report=None):
+        def capture(prompt, cfg, role, report=None, timeout=None):
             seen["prompt"], seen["role"] = prompt, role
             return '[{"topic": "shape parameter choice", "domain": "numerics", "depth": 4}]'
 

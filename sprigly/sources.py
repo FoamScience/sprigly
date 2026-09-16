@@ -89,19 +89,30 @@ def _openalex_work(w: dict) -> Work:
     )
 
 
-def search_openalex(query: str, limit: int = 20, mailto: str | None = None) -> list[Work]:
-    """Primary index. Carries retraction, open-access and venue metadata in one call."""
-    import pyalex
+OPENALEX_URL = "https://api.openalex.org/works"
 
+
+def search_openalex(query: str, limit: int = 20, mailto: str | None = None,
+                    timeout: float = 30.0) -> list[Work]:
+    """Primary index. Carries retraction, open-access and venue metadata in one call.
+
+    Called directly rather than through pyalex, which offers no way to set a timeout and calls
+    requests without one — a stalled connection then blocks the whole harvest indefinitely. The
+    response is parsed here either way, so the library was only contributing the HTTP call.
+    """
+    import httpx
+
+    params = {"search": query, "per-page": str(min(limit, 50))}
     # Identifying yourself puts requests in OpenAlex's faster "polite pool". It is off unless the
     # user configures an address — sending their email to a third party is their call, not ours.
     if mailto:
-        pyalex.config.email = mailto
-    rows = pyalex.Works().search(query).get(per_page=min(limit, 50))
-    return [_openalex_work(w) for w in rows][:limit]
+        params["mailto"] = mailto
+    r = httpx.get(OPENALEX_URL, params=params, timeout=timeout, follow_redirects=True)
+    r.raise_for_status()
+    return [_openalex_work(w) for w in r.json().get("results", [])][:limit]
 
 
-def search_arxiv(query: str, limit: int = 10) -> list[Work]:
+def search_arxiv(query: str, limit: int = 10, timeout: float = 30.0) -> list[Work]:
     """Preprints. Always open access, never peer reviewed — the gate tiers them accordingly."""
     import arxiv
 
@@ -162,26 +173,42 @@ def search(query: str, limit: int = 20, cfg: dict | None = None, report=None) ->
     no agent narrating it, so without this the command looks stalled for minutes.
     """
     import time
+    from concurrent.futures import ThreadPoolExecutor
 
     say = report or (lambda _msg: None)
-    mailto = ((cfg or {}).get("sources", {}) or {}).get("mailto") or None
-    found: dict[str, Work] = {}
-    for name, call in (("openalex", lambda: search_openalex(query, limit, mailto)),
-                       ("arxiv", lambda: search_arxiv(query, max(limit // 2, 3)))):
-        say(f"querying {name}")
+    opts = (cfg or {}).get("sources", {}) or {}
+    mailto = opts.get("mailto") or None
+    http_timeout = opts.get("http_timeout_seconds", 30.0)
+    adapters = {
+        "openalex": lambda: search_openalex(query, limit, mailto, http_timeout),
+        "arxiv": lambda: search_arxiv(query, max(limit // 2, 3), http_timeout),
+    }
+
+    def run(name, call):
         started = time.monotonic()
         try:
-            rows = call()
+            return name, call(), time.monotonic() - started, None
         except Exception as err:
+            return name, [], time.monotonic() - started, err
+
+    say(f"querying {', '.join(adapters)}")
+    # The adapters are independent network calls, so waiting for them one after another adds their
+    # latencies for nothing. Results are merged in a fixed order regardless of who answers first.
+    with ThreadPoolExecutor(max_workers=len(adapters)) as pool:
+        results = list(pool.map(lambda kv: run(*kv), adapters.items()))
+
+    found: dict[str, Work] = {}
+    for name, rows, elapsed, err in results:
+        if err is not None:
             log.warning("%s adapter failed for %r: %s", name, query, err)
-            say(f"{name} failed after {time.monotonic() - started:.0f}s")
+            say(f"{name} failed after {elapsed:.0f}s: {err}")
             continue
         fresh = 0
         for w in rows:
             if w.title and w.key not in found:
                 found[w.key] = w
                 fresh += 1
-        say(f"{name}: {len(rows)} works, {fresh} new ({time.monotonic() - started:.0f}s)")
+        say(f"{name}: {len(rows)} works, {fresh} new ({elapsed:.0f}s)")
     return list(found.values())
 
 

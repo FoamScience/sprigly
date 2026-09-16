@@ -7,7 +7,6 @@ requires-python = ">=3.11"
 dependencies = [
     "notebooklm-py[android]>=0.8,<0.9",
     "fsrs>=6",
-    "pyalex",
     "habanero",
     "arxiv",
     "trafilatura",

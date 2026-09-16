@@ -264,6 +264,16 @@ OA resolution order: OpenAlex `best_oa_location.pdf_url`, then an arXiv version,
 logged reason. `trafilatura` converts HTML to clean text; `yt-dlp` handles Tier C **only if** the
 bridge cannot take a video URL as a source directly — verify that in step 0.
 
+Adapters run concurrently, and so do the source downloads — both are independent and dominated by
+waiting, so running them in sequence adds their latencies for nothing. Every network call carries a
+timeout: one stalled host must not hold a harvest open indefinitely.
+
+Only the strongest `rank_limit` candidates are put in front of the relevance agent, ordered by
+citation count. A long listing is what a small model stalls on, and anything not ranked can still
+top the selection up to the budget, so nothing is lost outright. The pass also gets a shorter
+timeout than a curate call: it degrades open, so waiting the full budget only to keep everything is
+wasted time.
+
 **Relevance is a separate pass from credibility, and the only one the agent runs.** The gate cannot
 catch a paper that is peer-reviewed, open access and about something else entirely: searching
 *meshfree radial basis function* on arXiv returns *Radial velocity follow-up of CoRoT transiting
@@ -422,7 +432,7 @@ One TOML file. Everything below is a knob, and none of it is a code change:
 |---|---|
 | NotebookLM control | `notebooklm-py` (pinned `>=0.8,<0.9`) |
 | Spaced repetition | `fsrs` |
-| Literature metadata | `pyalex` (OpenAlex), `habanero` (Crossref), `arxiv` |
+| Literature metadata | `habanero` (Crossref), `arxiv`; OpenAlex is called directly over `httpx`, since `pyalex` offers no timeout |
 | URL to clean text | `trafilatura` |
 | CLI / output / HTTP | `click`, `rich`, `httpx` — already transitive deps of `notebooklm-py` |
 | Fuzzy picking | `iterfzf` — ships the `fzf` binary in the wheel, so nothing to install separately |

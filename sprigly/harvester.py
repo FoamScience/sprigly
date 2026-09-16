@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -33,14 +34,20 @@ def rank_relevance(topic: str, depth: int, works: list[Work], cfg: dict,
     """
     if not works:
         return [], []
+    # Only the strongest slice is put in front of the agent. A long listing is what a small model
+    # stalls on, and anything not ranked can still be topped up below, so nothing is lost outright.
+    cap = cfg["sources"]["rank_limit"] or len(works)
+    ordered = sorted(works, key=lambda w: (-w.cited_by, -(w.year or 0)))
+    head, tail = ordered[:cap], ordered[cap:]
     listing = "\n".join(
         f"{i}. {w.title} — {w.venue or 'unknown venue'}, {w.year or 'n.d.'} [{w.work_type or '?'}]"
-        for i, w in enumerate(works, 1))
+        for i, w in enumerate(head, 1))
     prompt = curator.render("relevance", topic=topic, depth=depth,
                             scope=cfg["depth"][str(depth)]["scope"], candidates=listing)
     try:
         picks = curator.ask(prompt, cfg, "judgement", runner or curator.run_agent,
-                            validator=_validate_picks, report=report)
+                            validator=_validate_picks, report=report,
+                            timeout=cfg["agent"]["relevance_timeout_seconds"])
     except Exception as err:
         # Deliberately broad. Degrading open is the whole point of this pass, and narrowing it to
         # CuratorError let a subprocess timeout through, which parked the lesson after 871 seconds
@@ -48,8 +55,13 @@ def rank_relevance(topic: str, depth: int, works: list[Work], cfg: dict,
         log.warning("relevance pass unusable, keeping every source: %s", err)
         return works, []
     keep_idx = {p["n"] for p in picks if isinstance(p.get("n"), int)}
-    keep = [w for i, w in enumerate(works, 1) if i in keep_idx]
-    dropped = [(w, "off topic") for i, w in enumerate(works, 1) if i not in keep_idx]
+    keep = [w for i, w in enumerate(head, 1) if i in keep_idx]
+    dropped = [(w, "off topic") for i, w in enumerate(head, 1) if i not in keep_idx]
+    # If the ranked slice did not yield enough, the unranked remainder makes up the difference
+    # rather than the lesson going thin over a prompt-size decision.
+    budget = cfg["depth"][str(depth)]["sources"]
+    if len(keep) < budget and tail:
+        keep += tail[:budget - len(keep)]
     return (keep or works), dropped
 
 
@@ -190,17 +202,21 @@ def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None,
     for note in admission.notes:
         say(note)
 
+    # Fetches are independent and dominated by waiting, so they run together. Order is preserved
+    # by collecting results per index rather than as they finish.
+    workers = max(1, int(cfg["sources"]["fetch_workers"]))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        paths = list(pool.map(lambda w: fetch(w, dest, cfg), admission.accepted))
+
     records = []
-    for w in admission.accepted:
+    for w, got in zip(admission.accepted, paths):
         tier = gate.tier_of(w, cfg)
         records.append({
             "url": w.url, "doi": w.doi, "title": w.title, "venue": w.venue, "year": w.year,
             "work_type": w.work_type, "tier": tier, "evidence_level": gate.TIER_LEVEL[tier],
             "oa_status": "oa" if w.is_oa else None, "retracted": int(w.retracted),
-            "local_path": None,
+            "local_path": got,
         })
-        records[-1]["local_path"] = fetch(w, dest, cfg)
-        got = records[-1]["local_path"]
         size = f"{Path(got).stat().st_size // 1024}k" if got and Path(got).exists() else \
             ("saved" if got else "url only")
         say(f"[{tier}] {size}  {w.title[:64]}")
@@ -218,18 +234,19 @@ def _selfcheck() -> None:
     cfg = config.load(path=Path("/nonexistent.toml"))
     depth = 3
 
-    def work(title, **kw):
+    def work(title, cited_by=0, **kw):
         kw.setdefault("venue", "JCP")
         kw.setdefault("venue_type", "journal")
         kw.setdefault("work_type", "article")
         kw.setdefault("is_oa", True)
         return Work(title=title, url=f"https://example.org/{_slug(title)}",
-                    doi=f"10.1/{_slug(title)}", **kw)
+                    doi=f"10.1/{_slug(title)}", cited_by=cited_by, **kw)
 
     on_topic = work("how rbf-fd builds a stencil")
     off_topic = work("radial velocity follow-up of corot transiting exoplanets")
 
-    keep_first = lambda prompt, cfg, role, report=None: '[{"n": 1, "why": "directly on topic"}]'
+    keep_first = lambda prompt, cfg, role, report=None, timeout=None: \
+        '[{"n": 1, "why": "directly on topic"}]'
     kept, dropped = rank_relevance("rbf-fd stencils", depth, [on_topic, off_topic], cfg, keep_first)
     assert kept == [on_topic] and len(dropped) == 1, "an off-topic credible paper is dropped"
 
@@ -248,6 +265,28 @@ def _selfcheck() -> None:
     assert len(kept) == 2, "an agent that rejects everything is not believed"
 
     assert rank_relevance("x", depth, [], cfg, boom) == ([], []), "no candidates, no agent call"
+
+    # Only rank_limit candidates reach the agent, and the rest top up a short result.
+    cfg["sources"]["rank_limit"] = 3
+    seen_prompt = {}
+
+    def keep_one(prompt, cfg, role, report=None, timeout=None):
+        seen_prompt["text"], seen_prompt["timeout"] = prompt, timeout
+        return '[{"n": 1, "why": "on topic"}]'
+
+    many = [work(f"paper {i}", cited_by=100 - i) for i in range(12)]
+    kept, _ = rank_relevance("x", depth, many, cfg, keep_one)
+    listed = [l for l in seen_prompt["text"].splitlines()
+              if re.match(r"^\d+\. .+ — ", l)]
+    assert len(listed) == 3, f"the agent sees only the ranked slice, got {listed}"
+    assert seen_prompt["timeout"] == cfg["agent"]["relevance_timeout_seconds"], \
+        "the relevance pass gets its own shorter leash"
+    assert "paper 2" in seen_prompt["text"] and "paper 3" not in seen_prompt["text"], \
+        "the slice is the most cited, not an arbitrary prefix"
+    assert len(kept) == cfg["depth"][str(depth)]["sources"], \
+        "the unranked remainder tops the selection up to the budget"
+    assert kept[0].title == "paper 0", "what the agent kept comes first"
+    cfg["sources"]["rank_limit"] = 20
 
     # A publisher answering pdf_url with a consent page is the common case, not an edge one.
     assert _challenge(b"<html><title>Client Challenge</title>"), "springer's interstitial"
