@@ -524,3 +524,85 @@ def done(cfg: dict, lesson_id: int, rating: int | None, note: str) -> None:
                + (f": rating {rating}" if rating else "")
                + (f" — {note.strip()}" if note.strip() else ""))
     conn.close()
+
+
+RATING_KEYS = {"1": "Again", "2": "Hard", "3": "Good", "4": "Easy"}
+
+
+def _drill(conn, console, cards, cfg) -> int:
+    """Ask each card, take a self-grade, schedule it. Returns how many were graded."""
+    from rich.panel import Panel
+
+    from . import review
+
+    graded = 0
+    for i, card in enumerate(cards, 1):
+        console.print(Panel(card["front"], title=f"{i}/{len(cards)}", border_style="cyan"))
+        click.prompt("press enter to reveal", default="", show_default=False, prompt_suffix="")
+        console.print(Panel(card["back"], border_style="green"))
+        choice = click.prompt("  1 again  2 hard  3 good  4 easy  (q to stop)",
+                              default="3", show_default=False)
+        if choice.strip().lower().startswith("q"):
+            break
+        rating = RATING_KEYS.get(choice.strip(), "Good")
+        when = review.grade(conn, card, rating)
+        console.print(f"  [dim]{rating.lower()}, due {when[:10]}[/dim]\n")
+        graded += 1
+    return graded
+
+
+@main.command()
+@click.argument("lesson_id", type=int)
+@click.pass_obj
+def quiz(cfg: dict, lesson_id: int) -> None:
+    """Work through a lesson's questions and schedule them for review.
+
+    The questions come from NotebookLM, generated from the same sources as the lesson. Grading is
+    yours: only you know whether an answer was recalled or reconstructed.
+    """
+    from rich.console import Console
+
+    from . import review, store
+
+    console = Console()
+    conn = store.connect(cfg["paths"]["db"])
+    if not conn.execute("SELECT 1 FROM lesson WHERE id=?", (lesson_id,)).fetchone():
+        raise click.ClickException(f"no lesson {lesson_id}")
+
+    added = review.import_cards(conn, cfg, lesson_id)
+    if added:
+        console.print(f"[dim]imported {added} cards[/dim]")
+    cards = conn.execute("SELECT * FROM card WHERE lesson_id=? ORDER BY id",
+                         (lesson_id,)).fetchall()
+    if not cards:
+        raise click.ClickException(
+            f"lesson {lesson_id} has no questions — is 'quiz' in bridge.artifacts, and has it "
+            f"finished generating? `sprigly status {lesson_id}` shows what arrived")
+
+    graded = _drill(conn, console, cards, cfg)
+    if graded:
+        review.finish(conn, lesson_id)
+        console.print(f"[green]✓[/green] graded {graded} of {len(cards)}")
+    conn.close()
+
+
+@main.command("review")
+@click.option("--limit", type=int, default=20, show_default=True, help="Most cards to drill.")
+@click.pass_obj
+def review_due(cfg: dict, limit: int) -> None:
+    """Drill every card that has come due, across all lessons."""
+    from rich.console import Console
+
+    from . import review, store
+
+    console = Console()
+    conn = store.connect(cfg["paths"]["db"])
+    cards = review.due(conn)[:limit]
+    if not cards:
+        nxt = store.due_cards(conn)[1]
+        console.print("nothing due" + (f" — next on {nxt[:10]}" if nxt else ""))
+        conn.close()
+        return
+    graded = _drill(conn, console, cards, cfg)
+    console.print(f"[green]✓[/green] graded {graded} of {len(cards)} due")
+    conn.close()
