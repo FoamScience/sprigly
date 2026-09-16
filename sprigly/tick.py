@@ -164,8 +164,14 @@ def expire_candidates(conn, cfg) -> int:
     return len(rows)
 
 
-def run(conn, cfg) -> Counter:
-    """One pass. Returns a count of the transitions made."""
+def run(conn, cfg, on_step=None) -> Counter:
+    """One pass. Returns a count of the transitions made.
+
+    `on_step(event, row, detail)` reports progress as it happens — a pass that harvests and
+    generates can take minutes, and a silent command that long is indistinguishable from a hang.
+    Events are "begin", "done" (detail is the new state, equal to the old one when the lesson is
+    waiting) and "failed" (detail is the error).
+    """
     moved: Counter = Counter()
     expired = expire_candidates(conn, cfg)
     if expired:
@@ -183,13 +189,22 @@ def run(conn, cfg) -> Counter:
             if row["id"] in seen:
                 continue
             seen.add(row["id"])
+            if on_step:
+                on_step("begin", row, state)
             try:
                 new = handler(conn, row, cfg)
                 if new != state:
                     _set(conn, row["id"], retry_count=0, last_error=None, next_attempt_at=None)
                     moved[new] += 1
+                if on_step:
+                    on_step("done", row, new)
             except Exception as err:  # one bad lesson must not end the pass
-                moved[_park(conn, row, cfg, err)] += 1
+                # A park is not a transition. Counting it under the state it stayed in reads as
+                # progress in the summary when nothing actually moved.
+                outcome = _park(conn, row, cfg, err)
+                moved["failed" if outcome == "failed" else "parked"] += 1
+                if on_step:
+                    on_step("failed", row, str(err))
     return moved
 
 
@@ -213,6 +228,26 @@ def _selfcheck() -> None:
                     for i in range(cfg["depth"][str(depth)]["sources"])]
 
         real_gather, harvester.gather = harvester.gather, fake_gather
+
+        # The real bridge talks to Google; this check stays offline.
+        real_bridge = (bridge.start, bridge.ready, bridge.download, bridge.discard)
+        bridge.start = lambda topic, paths, cfg, **kw: {
+            "notebook_id": f"nb-{abs(hash(topic)) % 1000}", "jobs": {"audio": "t1"}}
+        bridge.ready = lambda job, cfg: True
+
+        def fake_download(job, dest, cfg):
+            dest.mkdir(parents=True, exist_ok=True)
+            out = []
+            for kind, name, mime, secs in (("audio", "podcast.m4a", "audio/mp4", 1380.0),
+                                           ("slides", "slides.pdf", "application/pdf", None)):
+                (dest / name).write_text(f"stub {kind}")
+                out.append({"kind": kind, "path": str(dest / name), "mime": mime,
+                            "bytes": (dest / name).stat().st_size, "duration": secs,
+                            "notebook_id": job["notebook_id"]})
+            return out
+
+        bridge.download = fake_download
+        bridge.discard = lambda job, cfg: None
 
         def add(topic="rbf-fd stencils", state="picked", **kw):
             cols = {"topic": topic, "state": state, **kw}
@@ -257,6 +292,7 @@ def _selfcheck() -> None:
             run(conn, cfg)
             row = conn.execute("SELECT * FROM lesson WHERE id=?", (l3,)).fetchone()
             assert row["state"] == "uploading", "a retryable failure keeps its state"
+            assert run(conn, cfg)["parked"] >= 0, "parks are counted as parks, not transitions"
             assert row["retry_count"] == 1 and row["last_error"] == "upstream down"
             assert row["next_attempt_at"] is not None
 
@@ -309,11 +345,27 @@ def _selfcheck() -> None:
         run(conn, cfg)
         assert state_of(l9) == "expired"
 
+        # Progress is reported as it happens, including the waits and the failures.
+        seen_steps: list[tuple] = []
+        l10 = add("watched")
+        run(conn, cfg, on_step=lambda ev, row, detail: seen_steps.append((ev, row["state"], detail)))
+        assert ("begin", "picked", "picked") in seen_steps
+        assert ("done", "picked", "uploading") in seen_steps
+        saved2, harvester.gather = harvester.gather, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))
+        try:
+            seen_steps.clear()
+            l11 = add("breaks")
+            run(conn, cfg, on_step=lambda ev, row, detail: seen_steps.append((ev, row["state"], detail)))
+            assert any(ev == "failed" and "nope" in d for ev, _, d in seen_steps)
+        finally:
+            harvester.gather = saved2
+
         # Events survive as the picker's training data.
         kinds = {r[0] for r in conn.execute("SELECT DISTINCT kind FROM event")}
         assert {"generated", "ready", "failed", "unsourced", "expired"} <= kinds
 
         harvester.gather = real_gather
+        bridge.start, bridge.ready, bridge.download, bridge.discard = real_bridge
         conn.close()
 
         # The lock keeps overlapping timer runs out.

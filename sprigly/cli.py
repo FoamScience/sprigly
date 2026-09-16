@@ -49,19 +49,43 @@ def tick(cfg: dict) -> None:
     """Advance every lesson one step. Safe to run from a timer."""
     from . import store, tick as ticker
 
+    from rich.console import Console
+
+    console = Console()
     with ticker.lock(cfg["paths"]["data"] / "tick.lock") as held:
         if not held:
             click.echo("another tick is running")
             return
         conn = store.connect(cfg["paths"]["db"])
-        moved = ticker.run(conn, cfg)
+        started = time.monotonic()
+        status = console.status("[dim]scanning[/dim]", spinner="dots")
+
+        def step(event: str, row, detail: str) -> None:
+            topic = (row["topic"] or "")[:48]
+            if event == "begin":
+                status.update(f"[cyan]{row['state']}[/cyan] [dim]{topic}[/dim]")
+            elif event == "done" and detail != row["state"]:
+                console.print(f"[green]✓[/green] {row['id']:>3}  {row['state']} → {detail}"
+                              f"  [dim]{topic}[/dim]")
+            elif event == "done":
+                console.print(f"[dim]·[/dim] {row['id']:>3}  {detail} (waiting)  [dim]{topic}[/dim]")
+            else:
+                console.print(f"[yellow]![/yellow] {row['id']:>3}  {row['state']} parked"
+                              f"  [dim]{detail[:60]}[/dim]")
+
+        status.start()
+        try:
+            moved = ticker.run(conn, cfg, on_step=step)
+        finally:
+            status.stop()
         # Only when something actually moved. Backing up an unchanged database every few minutes
         # would rotate the useful history out of the window.
         if any(moved.values()):
             store.backup(conn, cfg["paths"]["backups"], cfg["store"]["backup_keep"])
         conn.close()
     log.info("tick moved %s", dict(moved))
-    click.echo(", ".join(f"{v} -> {k}" for k, v in sorted(moved.items()) if v) or "nothing to do")
+    summary = ", ".join(f"{v} -> {k}" for k, v in sorted(moved.items()) if v)
+    console.print(f"[dim]{summary or 'nothing to do'} in {time.monotonic() - started:.0f}s[/dim]")
 
 
 @main.command()
