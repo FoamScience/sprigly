@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import shutil
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -155,6 +156,50 @@ HANDLERS = {
 # `proposed` waits for a human pick; `ready` onwards waits for a consumption signal.
 
 
+REDO_STAGES = {
+    # stage -> (state to return to, what gets thrown away)
+    "harvest": ("picked", "sources, brief and any notebook"),
+    "upload": ("uploading", "the notebook and any artifacts"),
+}
+
+
+def redo(conn, cfg, lesson_id: int, stage: str) -> str:
+    """Rewind one lesson so a later tick re-runs a phase.
+
+    Re-running is not idempotent from where the lesson stands — a half-harvested lesson has source
+    rows and files that would be counted again — so rewinding means clearing what that phase
+    produced, not just setting the state back.
+    """
+    row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
+    if not row:
+        raise ValueError(f"no lesson {lesson_id}")
+    if stage not in REDO_STAGES:
+        raise ValueError(f"unknown stage {stage!r}, expected one of {sorted(REDO_STAGES)}")
+    state, _ = REDO_STAGES[stage]
+
+    if row["job_ref"]:
+        # Leaving the old notebook behind would burn the account's cap one redo at a time.
+        try:
+            bridge.discard(json.loads(row["job_ref"]), cfg)
+        except Exception as err:
+            log.warning("could not discard the previous notebook: %s", err)
+
+    lesson_dir = _lesson_dir(cfg, lesson_id)
+    for a in conn.execute("SELECT path FROM artifact WHERE lesson_id=?", (lesson_id,)):
+        Path(a["path"]).unlink(missing_ok=True)
+    conn.execute("DELETE FROM artifact WHERE lesson_id=?", (lesson_id,))
+
+    if stage == "harvest":
+        conn.execute("DELETE FROM lesson_source WHERE lesson_id=?", (lesson_id,))
+        shutil.rmtree(lesson_dir / "sources", ignore_errors=True)
+        (lesson_dir / "brief.md").unlink(missing_ok=True)
+
+    _set(conn, lesson_id, state=state, job_ref=None, notebook_id=None, polled_at=None,
+         retry_count=0, last_error=None, next_attempt_at=None, thin=0)
+    store.log_event(conn, "redo", lesson_id, json.dumps({"stage": stage, "from": row["state"]}))
+    return state
+
+
 def expire_candidates(conn, cfg) -> int:
     """Unpicked candidates do not accumulate forever."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=cfg["lesson"]["candidate_ttl_days"])).strftime(TS)
@@ -165,7 +210,7 @@ def expire_candidates(conn, cfg) -> int:
     return len(rows)
 
 
-def run(conn, cfg, on_step=None) -> Counter:
+def run(conn, cfg, on_step=None, only: int | None = None) -> Counter:
     """One pass. Returns a count of the transitions made.
 
     `on_step(event, row, detail)` reports progress as it happens — a pass that harvests and
@@ -174,18 +219,23 @@ def run(conn, cfg, on_step=None) -> Counter:
     waiting) and "failed" (detail is the error).
     """
     moved: Counter = Counter()
-    expired = expire_candidates(conn, cfg)
-    if expired:
-        moved["expired"] = expired
+    if only is None:
+        expired = expire_candidates(conn, cfg)
+        if expired:
+            moved["expired"] = expired
     now = utcnow()
     # A lesson advances at most once per pass. Without this, a lesson moved into `uploading` would
     # be picked up again by the `uploading` handler later in the same loop and run the whole
     # pipeline in one go, which defeats both the poll and the daily generation cap.
     seen: set[int] = set()
     for state, handler in HANDLERS.items():
+        # A targeted run ignores the backoff window: asking for one lesson by name is an explicit
+        # instruction, not the timer coming round again.
         rows = conn.execute(
-            "SELECT * FROM lesson WHERE state=? AND (next_attempt_at IS NULL OR next_attempt_at<=?)",
-            (state, now)).fetchall()
+            "SELECT * FROM lesson WHERE state=? AND id=?", (state, only)).fetchall() if only \
+            else conn.execute(
+                "SELECT * FROM lesson WHERE state=?"
+                " AND (next_attempt_at IS NULL OR next_attempt_at<=?)", (state, now)).fetchall()
         for row in rows:
             if row["id"] in seen:
                 continue
@@ -367,6 +417,47 @@ def _selfcheck() -> None:
             assert any(ev == "failed" and "nope" in d for ev, _, d in seen_steps)
         finally:
             harvester.gather = saved2
+
+        # A redo rewinds a lesson and clears what the phase produced, so it is not counted twice.
+        done = add("finished", state="ready")
+        conn.execute("INSERT INTO lesson_source VALUES (?,?)",
+                     (done, conn.execute("SELECT id FROM source LIMIT 1").fetchone()[0]))
+        art = _lesson_dir(cfg, done)
+        art.mkdir(parents=True, exist_ok=True)
+        (art / "podcast.m4a").write_text("audio")
+        conn.execute("INSERT INTO artifact (lesson_id, kind, path) VALUES (?,?,?)",
+                     (done, "audio", str(art / "podcast.m4a")))
+        _set(conn, done, job_ref='{"notebook_id": "nb-old", "jobs": {}}', notebook_id="nb-old")
+
+        assert redo(conn, cfg, done, "upload") == "uploading"
+        assert conn.execute("SELECT count(*) FROM artifact WHERE lesson_id=?",
+                            (done,)).fetchone()[0] == 0, "artifacts are cleared"
+        assert not (art / "podcast.m4a").exists(), "and so are their files"
+        assert conn.execute("SELECT count(*) FROM lesson_source WHERE lesson_id=?",
+                            (done,)).fetchone()[0] == 1, "--from upload keeps the sources"
+        row = conn.execute("SELECT * FROM lesson WHERE id=?", (done,)).fetchone()
+        assert row["job_ref"] is None and row["notebook_id"] is None, "the old notebook is let go"
+
+        assert redo(conn, cfg, done, "harvest") == "picked"
+        assert conn.execute("SELECT count(*) FROM lesson_source WHERE lesson_id=?",
+                            (done,)).fetchone()[0] == 0, "--from harvest drops the sources too"
+        try:
+            redo(conn, cfg, done, "nonsense")
+            raise AssertionError("an unknown stage is refused")
+        except ValueError:
+            pass
+        try:
+            redo(conn, cfg, 9999, "harvest")
+            raise AssertionError("an unknown lesson is refused")
+        except ValueError:
+            pass
+
+        # A targeted run touches only the lesson named, and ignores its backoff.
+        a1, a2 = add("target"), add("bystander")
+        _set(conn, a1, next_attempt_at="2099-01-01T00:00:00Z", retry_count=1)
+        run(conn, cfg, only=a1)
+        assert state_of(a1) == "uploading", "an explicit request ignores the backoff window"
+        assert state_of(a2) == "picked", "and leaves everything else alone"
 
         # Events survive as the picker's training data.
         kinds = {r[0] for r in conn.execute("SELECT DISTINCT kind FROM event")}

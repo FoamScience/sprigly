@@ -68,8 +68,9 @@ def show_config(cfg: dict) -> None:
 
 
 @main.command()
+@click.option("--lesson", type=int, help="Advance only this lesson, ignoring its backoff window.")
 @click.pass_obj
-def tick(cfg: dict) -> None:
+def tick(cfg: dict, lesson: int | None) -> None:
     """Advance every lesson one step. Safe to run from a timer."""
     from . import store, tick as ticker
 
@@ -102,7 +103,7 @@ def tick(cfg: dict) -> None:
 
         status.start()
         try:
-            moved = ticker.run(conn, cfg, on_step=step)
+            moved = ticker.run(conn, cfg, on_step=step, only=lesson)
         finally:
             status.stop()
         # Only when something actually moved. Backing up an unchanged database every few minutes
@@ -360,3 +361,31 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
 
     if row["job_ref"]:
         console.print(f"[dim]jobs[/dim] {row['job_ref']}")
+
+
+@main.command()
+@click.argument("lesson_id", type=int)
+@click.option("--from", "stage", type=click.Choice(["harvest", "upload"]), default="harvest",
+              show_default=True, help="Which phase to run again.")
+@click.pass_obj
+def redo(cfg: dict, lesson_id: int, stage: str) -> None:
+    """Rewind a lesson so the next tick re-runs a phase.
+
+    `--from harvest` throws away its sources and brief and searches again. `--from upload` keeps the
+    sources but discards the notebook and artifacts. Either way the old notebook is deleted, so a
+    redo does not quietly consume the account's notebook cap.
+    """
+    from rich.console import Console
+
+    from . import store, tick as ticker
+
+    conn = store.connect(cfg["paths"]["db"])
+    _echo_warnings(Console())
+    try:
+        state = ticker.redo(conn, cfg, lesson_id, stage)
+    except ValueError as err:
+        raise click.ClickException(str(err))
+    _, discarded = ticker.REDO_STAGES[stage]
+    click.echo(f"lesson {lesson_id} rewound to {state}; discarded {discarded}")
+    click.echo(f"run `sprigly tick --lesson {lesson_id}`")
+    conn.close()
