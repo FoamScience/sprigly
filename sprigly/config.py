@@ -18,15 +18,13 @@ DEFAULTS: dict[str, Any] = {
         # opencode | claude
         "backend": "opencode",
         # Model ids are backend-specific — opencode wants provider/model, the claude CLI wants a
-        # short alias — so they are keyed by backend rather than shared. A cheap model does the
-        # bulk passes; judgement calls (syllabus decomposition, relevance ranking) get a stronger
-        # one. Check available ids with `opencode models`.
+        # short alias — so they are keyed by backend rather than shared. The opencode backend runs
+        # everything on the free router; the split between bulk work and judgement calls (syllabus
+        # decomposition, relevance ranking) only buys anything on the claude backend. Check
+        # available ids with `opencode models`.
         "models": {
-            "opencode": {
-                "bulk": "opencode/nemotron-3.5-lightning-free",
-                "judgement": "openrouter/anthropic/claude-sonnet-5",
-            },
-            "claude": {"bulk": "haiku", "judgement": "sonnet"},
+            "opencode": {"bulk": "openrouter/openrouter/free", "judgement": "openrouter/openrouter/free"},
+            "claude": {"bulk": "sonnet", "judgement": "opus"},
         },
         "max_retries": 2,
         "timeout_seconds": 600,
