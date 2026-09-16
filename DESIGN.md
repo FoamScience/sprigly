@@ -114,6 +114,11 @@ ordered syllabus, capped at 25 lessons per decomposition — finer coverage come
 `sprigly deeper`, not one giant dump. Re-decomposition matches on normalised topic text: reviewed
 and picked lessons survive, only `proposed` ones are replaced.
 
+The prompt carries three lists back to the agent: what was recently taught, **what is already
+proposed and still waiting**, and the tag vocabulary so far. The pending list is not optional — with
+only "recently taught" in scope, a second `curate` run cannot see the standing pool and re-proposes
+all of it at a slightly different grain.
+
 There is no separate "does this topic exist" verification pass. The harvester's gate is the same
 test: a topic that yields no credible sources is misnamed or too niche, and the lesson goes to
 `unsourced`.

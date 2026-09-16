@@ -270,6 +270,22 @@ def offer(pool: list[Candidate], due: list[Candidate], s: Snapshot, cfg: dict,
     return reviews + select(score_pool(fresh, s, cfg, rng), s, cfg, k - len(reviews))
 
 
+def offer_all(pool: list[Candidate], due: list[Candidate], s: Snapshot, cfg: dict,
+              rng: random.Random | None = None) -> list[Offer]:
+    """Every eligible candidate, score-ordered, with due reviews first.
+
+    Skips the DPP and the calibration entirely — this is the escape hatch for browsing, not the
+    curated menu. The choice set logged is still exactly what was shown, so the fit stays honest.
+    """
+    rng = rng or random.Random()
+    reviews = sorted(score_pool(due, s, cfg, rng), key=lambda x: -x.score)
+    for r in reviews:
+        r.kind = "review"
+    fresh = sorted(score_pool([c for c in pool if eligible(c, s, cfg)], s, cfg, rng),
+                   key=lambda x: -x.score)
+    return reviews + fresh
+
+
 def _selfcheck() -> None:
     from . import config
 
@@ -373,6 +389,17 @@ def _selfcheck() -> None:
     assert all(x.signals["preference"] is not None for x in menu)
     assert offer([], [], empty, cfg, random.Random(2)) == [], "an empty pool offers nothing"
     assert all(x.score >= 0 for x in menu)
+
+    # --- offer_all is a browse, not a menu: everything eligible, nothing deduplicated
+    s = Snapshot(now=now)
+    every = offer_all(clones + [odd], due[:1], s, cfg, random.Random(3))
+    assert len(every) == 6, "all five candidates plus the due review"
+    assert every[0].kind == "review" and [x.kind for x in every[1:]] == ["new"] * 5
+    assert all(every[i].score >= every[i + 1].score for i in range(1, len(every) - 1)), \
+        "new candidates come back score-ordered"
+    gated = offer_all([cand(200, prereqs=["a", "b"])], [],
+                      Snapshot(now=now, seen_tags={"a", "b"}), cfg)
+    assert gated == [], "browsing still respects the eligibility gate"
 
     # --- focus retargets calibration instead of needing a bonus
     focused = Snapshot(now=now, focus_track_ids={1})

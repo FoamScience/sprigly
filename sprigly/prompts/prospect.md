@@ -9,6 +9,10 @@ Their tracks (larger goals being filled in by small lessons):
 Recently taught, do not repeat:
 {{recent}}
 
+Already proposed and still waiting to be taught. These are taken — do not propose them again, and
+do not propose a narrower slice or a rephrasing of one:
+{{pending}}
+
 Tags already in use. Reuse one whenever it fits rather than inventing a near-duplicate:
 {{known_tags}}
 

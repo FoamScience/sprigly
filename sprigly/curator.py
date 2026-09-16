@@ -142,13 +142,20 @@ def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=N
 
 
 def _context(conn: sqlite3.Connection, cfg: dict, track_id: int | None) -> dict:
+    scope = " AND track_id=?" if track_id else ""
+    args = (track_id,) if track_id else ()
     recent = [r[0] for r in conn.execute(
-        "SELECT topic FROM lesson WHERE state IN ('ready','consumed','reviewed')"
-        + (" AND track_id=?" if track_id else "") + " ORDER BY updated_at DESC LIMIT 20",
-        (track_id,) if track_id else ())]
+        "SELECT topic FROM lesson WHERE state IN ('ready','consumed','reviewed')" + scope
+        + " ORDER BY updated_at DESC LIMIT 20", args)]
+    # Candidates already waiting count as covered ground too. Without them every curate run
+    # re-proposes the standing pool at a slightly different grain.
+    pending = [r[0] for r in conn.execute(
+        "SELECT topic FROM lesson WHERE state IN ('proposed','picked','harvesting','uploading',"
+        "'generating') " + scope.replace(" AND", "AND") + " ORDER BY id DESC LIMIT 40", args)]
     known = tags.known_tags(conn)
     return {
         "recent": "\n".join(f"- {t}" for t in recent) or "- nothing yet",
+        "pending": "\n".join(f"- {t}" for t in pending) or "- nothing yet",
         "known_tags": ", ".join(known) or "none yet",
         "minutes": cfg["lesson"]["budget_minutes"],
     }
@@ -247,6 +254,7 @@ def _selfcheck() -> None:
 
         ids = propose(conn, cfg, runner=flaky)
         assert len(calls) == 2, "a rejected reply is retried with the complaint attached"
+        assert "nothing yet" in calls[0], "an empty store has no pending list"
         assert "previous reply was rejected" in calls[1]
         assert len(ids) == 1
 
@@ -287,6 +295,8 @@ def _selfcheck() -> None:
 
         # --- known tags are fed back so the vocabulary converges instead of drifting
         assert "rbf-fd" in seen["prompt"]
+        # --- and so are the candidates already waiting, or every run re-proposes the same ground
+        assert "how RBF-FD builds a stencil".lower() in seen["prompt"].lower()
         conn.close()
 
     try:

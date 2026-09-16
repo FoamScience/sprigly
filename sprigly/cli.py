@@ -134,8 +134,11 @@ def _why(offer, cfg: dict) -> str:
 
 @main.command()
 @click.option("--budget", type=int, help="Minutes available today.")
+@click.option("-k", "k", type=int, help="How many to offer (default from config).")
+@click.option("--all", "show_all", is_flag=True,
+              help="Offer every eligible candidate instead of a selected menu.")
 @click.pass_obj
-def next(cfg: dict, budget: int | None) -> None:
+def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
     """Offer the next lessons and record which one you take."""
     import json as _json
 
@@ -148,7 +151,11 @@ def next(cfg: dict, budget: int | None) -> None:
     snap = snapshot.load(conn, cfg)
     if budget:
         snap.budget_minutes = budget
-    menu = picker.offer(snapshot.candidates(conn), snapshot.due_reviews(conn), snap, cfg)
+    pool, due = snapshot.candidates(conn), snapshot.due_reviews(conn)
+    if k:
+        cfg["offer"]["k"] = k
+    menu = picker.offer_all(pool, due, snap, cfg) if show_all \
+        else picker.offer(pool, due, snap, cfg)
     if not menu:
         click.echo("nothing to offer — run the curator, or check `sprigly status`")
         conn.close()
