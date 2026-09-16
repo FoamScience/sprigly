@@ -166,9 +166,36 @@ def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
         click.echo(f"# backend={backend} role={role} model={model}\n")
         click.echo(prompt)
     else:
+        from rich.console import Console
+        from rich.table import Table
+
+        console = Console()
+        backend = cfg["agent"]["backend"]
+        _, role, _ = curator.build_prompt(conn, cfg, track, n)
+        model = cfg["agent"]["models"].get(backend, {}).get(role, "?")
+        goal = conn.execute("SELECT goal FROM track WHERE id=?", (track,)).fetchone() if track else None
+        console.print(f"[dim]·[/dim] {'decomposing ' + goal['goal'] if goal else 'prospecting'}"
+                      f" [dim]via {backend} {model}[/dim]")
+
+        started = time.monotonic()
+        status = console.status("[dim]waiting on the agent[/dim]", spinner="dots")
+        status.start()
         try:
-            ids = curator.propose(conn, cfg, track, n)
+            ids = curator.propose(
+                conn, cfg, track, n,
+                on_retry=lambda attempt, err: status.update(
+                    f"[yellow]retry {attempt}[/yellow] [dim]{err[:60]}[/dim]"))
         except curator.CuratorError as err:
             raise click.ClickException(str(err))
-        click.echo(f"proposed {len(ids)} lessons — run `sprigly next`")
+        finally:
+            status.stop()
+
+        console.print(f"[green]✓[/green] {len(ids)} proposed in {time.monotonic() - started:.0f}s")
+        table = Table("id", "topic", "domain", "depth", box=None, pad_edge=False)
+        for r in conn.execute(
+                f"SELECT id, topic, COALESCE(domain,'') AS domain, depth FROM lesson"
+                f" WHERE id IN ({','.join('?' * len(ids))})", ids):
+            table.add_row(str(r["id"]), r["topic"], r["domain"], str(r["depth"]))
+        console.print(table)
+        console.print("[dim]run `sprigly next`[/dim]")
     conn.close()

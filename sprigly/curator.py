@@ -123,7 +123,7 @@ def validate(items: list) -> list[dict]:
     return out
 
 
-def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent) -> list[dict]:
+def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=None) -> list[dict]:
     """Ask, validate, and on malformed output ask again with the complaint attached."""
     attempt, last = 0, None
     while attempt <= cfg["agent"]["max_retries"]:
@@ -136,6 +136,8 @@ def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent) -> list[di
             last = str(err)
             log.warning("curator attempt %d rejected: %s", attempt + 1, last)
             attempt += 1
+            if on_retry:
+                on_retry(attempt, last)
     raise CuratorError(f"agent returned unusable output {attempt} times: {last}")
 
 
@@ -174,10 +176,10 @@ def build_prompt(conn: sqlite3.Connection, cfg: dict, track_id: int | None = Non
 
 
 def propose(conn: sqlite3.Connection, cfg: dict, track_id: int | None = None,
-            n: int | None = None, runner=run_agent) -> list[int]:
+            n: int | None = None, runner=run_agent, on_retry=None) -> list[int]:
     """Write proposed lessons. Focused on a track it decomposes; otherwise it prospects."""
     prompt, role, language = build_prompt(conn, cfg, track_id, n)
-    items = ask(prompt, cfg, role, runner)
+    items = ask(prompt, cfg, role, runner, on_retry)
     ids = []
     for it in items:
         lid = conn.execute(

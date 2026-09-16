@@ -31,6 +31,9 @@ class Snapshot:
     now: str
     mastered_tags: set[str] = field(default_factory=set)
     due_tags: set[str] = field(default_factory=set)
+    # Tags the learner has actually met, mastered or not. The prerequisite gate needs this to tell
+    # "you tried this and it has lapsed" apart from "you have never been near this".
+    seen_tags: set[str] = field(default_factory=set)
     domain_last_seen: dict[str, str] = field(default_factory=dict)
     track_last_lesson: dict[int, str] = field(default_factory=dict)
     offers: dict[str, int] = field(default_factory=dict)
@@ -53,6 +56,11 @@ WHERE lt.kind = 'tag' AND l.state = 'reviewed' AND (
     EXISTS (SELECT 1 FROM card c WHERE c.lesson_id = l.id AND (c.due IS NULL OR c.due > ?))
     OR NOT EXISTS (SELECT 1 FROM card c WHERE c.lesson_id = l.id)
 )
+"""
+
+SEEN = """
+SELECT DISTINCT lt.tag FROM lesson_tag lt JOIN lesson l ON l.id = lt.lesson_id
+WHERE lt.kind = 'tag' AND l.state = 'reviewed'
 """
 
 DUE = """
@@ -79,6 +87,7 @@ def load(conn: sqlite3.Connection, cfg: dict, now: str | None = None) -> Snapsho
         now=now,
         mastered_tags={r[0] for r in conn.execute(MASTERED, (now,))},
         due_tags={r[0] for r in conn.execute(DUE, (now,))},
+        seen_tags={r[0] for r in conn.execute(SEEN)},
         domain_last_seen={r["k"]: r["t"] for r in conn.execute(LAST_SEEN.format(col="domain"))},
         track_last_lesson={r["k"]: r["t"] for r in conn.execute(LAST_SEEN.format(col="track_id"))},
         offers={r["k"]: r["n"] for r in conn.execute(BY_DOMAIN, ("offered",))},

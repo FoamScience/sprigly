@@ -123,11 +123,18 @@ test: a topic that yields no credible sources is misnamed or too niche, and the 
 Four layers, each borrowed from a different literature. The survey and citations are in
 [docs/picker-literature.md](docs/picker-literature.md).
 
-**Layer 1 — eligibility gate.** Drop candidates below the prerequisite floor (readiness of zero with
-two or more prerequisites), below `track.min_evidence`, or outside the active tracks under `--only`.
-Knowledge Space Theory calls this the *outer fringe*: ALEKS excludes what you are not ready for and
-lets you choose from the rest, rather than ranking everything and hoping the unready items lose.
-Partial readiness stays a soft weight — a half-met prerequisite is often where the good lesson is.
+**Layer 1 — eligibility gate.** Drop candidates below `track.min_evidence`, outside the active
+tracks under `--only`, or whose groundwork has demonstrably lapsed. Knowledge Space Theory calls
+this the *outer fringe*: ALEKS excludes what you are not ready for and lets you choose from the
+rest, rather than ranking everything and hoping the unready items lose. Partial readiness stays a
+soft weight — a half-met prerequisite is often where the good lesson is.
+
+Only prerequisites the learner has **already met** count toward the gate. A prerequisite never seen
+is evidence of unexplored ground, not of unreadiness, and counting it inverts the whole mechanism:
+with an empty knowledge state nothing is mastered, so every candidate carrying two prerequisites
+disappears — and the candidates carrying two prerequisites are the technical ones. The gate then
+silently deletes physics, numerics and mathematics from the menu and leaves the soft domains
+behind. This is not hypothetical; it is what the first real run did.
 
 **Layer 2 — relevance score.** Pure functions over a `Snapshot`; nothing here touches the DB. A
 weighted sum of:

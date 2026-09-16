@@ -42,12 +42,20 @@ def eligible(c: Candidate, s: Snapshot, cfg: dict) -> bool:
     """The fringe: what you could actually learn next. A gate, not a weight.
 
     Partial readiness stays soft — a half-met prerequisite is often where the good lesson is — but
-    nothing prepared at all, with several prerequisites outstanding, is excluded outright.
+    a lesson whose groundwork you demonstrably lapsed on is excluded outright.
+
+    Only prerequisites the learner has actually MET before count toward that. A prerequisite never
+    seen is no evidence of unreadiness, merely of unexplored ground, and counting it inverts the
+    whole point: on a cold start nothing is mastered, so every candidate with two prerequisites
+    disappears — and the candidates carrying two prerequisites are the technical ones. The gate
+    would quietly delete physics, numerics and mathematics from the menu and leave the soft
+    domains behind.
     """
     if s.focus_exclusive and s.focus_track_ids and c.track_id not in s.focus_track_ids:
         return False
     floor = cfg["offer"]["prereq_floor_min_prereqs"]
-    if len(c.prereqs) >= floor and readiness(c, s) == 0.0:
+    met_before = c.prereqs & s.seen_tags
+    if len(met_before) >= floor and not (met_before & s.mastered_tags):
         return False
     # Evidence level is only knowable once sources exist, so an unharvested candidate passes here
     # and is gated again at generation time.
@@ -276,12 +284,21 @@ def _selfcheck() -> None:
                          track, ev)
 
     # --- layer 1: the fringe gate
-    s = Snapshot(now=now, mastered_tags={"linear-algebra"})
+    seen = {"linear-algebra", "calculus", "group-theory", "quantum-field-theory"}
+    s = Snapshot(now=now, mastered_tags={"linear-algebra"}, seen_tags=seen)
     ready = cand(1, prereqs=["linear-algebra", "calculus"])
-    blocked = cand(2, prereqs=["quantum-field-theory", "group-theory"])
+    lapsed = cand(2, prereqs=["quantum-field-theory", "group-theory"])
     assert eligible(ready, s, cfg), "partial readiness stays soft"
-    assert not eligible(blocked, s, cfg), "nothing prepared, several prerequisites: excluded"
-    assert eligible(cand(3, prereqs=["group-theory"]), s, cfg), "a single unmet prerequisite is soft"
+    assert not eligible(lapsed, s, cfg), "groundwork met before and now lapsed: excluded"
+    assert eligible(cand(3, prereqs=["group-theory"]), s, cfg), "a single lapsed prerequisite is soft"
+
+    # The regression that shipped: an empty knowledge state must not delete every technical topic.
+    cold = Snapshot(now=now)
+    physics = cand(4, domain="physics", prereqs=["statistical-mechanics", "scaling-laws"])
+    assert eligible(physics, cold, cfg), "unseen prerequisites are not evidence of unreadiness"
+    partial = Snapshot(now=now, seen_tags={"linear-algebra"}, mastered_tags=set())
+    assert eligible(cand(5, prereqs=["linear-algebra", "never-encountered"]), partial, cfg), \
+        "one lapsed prerequisite plus one unseen is below the floor"
 
     excl = Snapshot(now=now, focus_track_ids={9}, focus_exclusive=True)
     assert not eligible(cand(4, track=None), excl, cfg)
