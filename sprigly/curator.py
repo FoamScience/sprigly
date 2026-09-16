@@ -153,7 +153,15 @@ def run_agent(prompt: str, cfg: dict, role: str = "bulk", report=None) -> str:
         raise CuratorError(f"{argv[0]} is not on PATH")
 
     if not report:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=a["timeout_seconds"])
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=a["timeout_seconds"])
+        except subprocess.TimeoutExpired:
+            # Every caller handles CuratorError; a raw TimeoutExpired escapes those handlers and
+            # takes the whole lesson down instead of degrading.
+            raise CuratorError(f"{argv[0]} exceeded {a['timeout_seconds']}s") from None
+        except OSError as err:
+            raise CuratorError(f"could not run {argv[0]}: {err}") from None
         if done.returncode != 0:
             raise CuratorError(f"{argv[0]} exited {done.returncode}: {done.stderr.strip()[:200]}")
         return done.stdout

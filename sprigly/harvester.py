@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +41,10 @@ def rank_relevance(topic: str, depth: int, works: list[Work], cfg: dict,
     try:
         picks = curator.ask(prompt, cfg, "judgement", runner or curator.run_agent,
                             validator=_validate_picks, report=report)
-    except curator.CuratorError as err:
+    except Exception as err:
+        # Deliberately broad. Degrading open is the whole point of this pass, and narrowing it to
+        # CuratorError let a subprocess timeout through, which parked the lesson after 871 seconds
+        # instead of harvesting the credible sources it already had.
         log.warning("relevance pass unusable, keeping every source: %s", err)
         return works, []
     keep_idx = {p["n"] for p in picks if isinstance(p.get("n"), int)}
@@ -215,9 +219,14 @@ def _selfcheck() -> None:
     assert kept == [on_topic] and len(dropped) == 1, "an off-topic credible paper is dropped"
 
     # Degrade open: a broken relevance pass must not silently harvest nothing.
-    boom = lambda *a, **k: (_ for _ in ()).throw(curator.CuratorError("agent down"))
-    kept, dropped = rank_relevance("x", depth, [on_topic, off_topic], cfg, boom)
-    assert kept == [on_topic, off_topic] and dropped == [], "unreachable agent keeps everything"
+    for failure in (curator.CuratorError("agent down"),
+                    subprocess.TimeoutExpired("opencode", 600),
+                    OSError("no such binary"),
+                    RuntimeError("something new")):
+        boom = (lambda exc: lambda *a, **k: (_ for _ in ()).throw(exc))(failure)
+        kept, dropped = rank_relevance("x", depth, [on_topic, off_topic], cfg, boom)
+        assert kept == [on_topic, off_topic] and dropped == [], \
+            f"a {type(failure).__name__} must keep everything, not park the lesson"
 
     keep_none = lambda *a, **k: '[{"n": 99, "why": "nothing matches"}]'
     kept, _ = rank_relevance("x", depth, [on_topic, off_topic], cfg, keep_none)

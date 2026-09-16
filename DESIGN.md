@@ -267,10 +267,12 @@ bridge cannot take a video URL as a source directly — verify that in step 0.
 **Relevance is a separate pass from credibility, and the only one the agent runs.** The gate cannot
 catch a paper that is peer-reviewed, open access and about something else entirely: searching
 *meshfree radial basis function* on arXiv returns *Radial velocity follow-up of CoRoT transiting
-exoplanets*, which is impeccable and about exoplanets. The relevance pass **degrades open** — an
-unreachable or unusable agent keeps every source, with a note — because the gate has already
-established these are credible, and silently harvesting nothing is a worse failure than harvesting
-a few loose ones. An agent that rejects *everything* is likewise not believed.
+exoplanets*, which is impeccable and about exoplanets. The relevance pass **degrades open on any failure** — unreachable, unusable,
+timed out, or a binary that is not there. It keeps every source and logs why. The gate has already
+established these are credible, so harvesting a few loose ones beats harvesting nothing. Catching
+only the library's own error type was not enough: a subprocess timeout escaped it and parked a
+lesson after 871 seconds with credible sources already in hand. An agent that rejects *everything*
+is likewise not believed.
 
 Each lesson also gets a `brief.md` written next to its sources: depth, target length, evidence
 level, any composition caveats, and the list of what was admitted. That becomes the NotebookLM
