@@ -1,0 +1,22 @@
+# uv / packaging
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local store, if XDG points inside the repo
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Credentials never belong here. notebooklm-py keeps its own token store in
+# ~/.notebooklm/; this is a guard against a copy landing in the tree.
+master_token.json
+storage_state.json
+.env

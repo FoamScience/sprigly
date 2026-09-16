@@ -1,0 +1,23 @@
+[project]
+name = "sprigly"
+version = "0.1.0"
+description = "Teaches one small, well-scoped thing at a time, across diverse domains"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "notebooklm-py[android]>=0.8,<0.9",
+    "fsrs>=6",
+    "pyalex",
+    "habanero",
+    "arxiv",
+    "trafilatura",
+    "click",
+    "rich",
+]
+
+[project.scripts]
+sprigly = "sprigly.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
