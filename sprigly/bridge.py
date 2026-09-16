@@ -177,6 +177,16 @@ async def _download(job_ref, dest: Path, cfg, report=None) -> list[dict[str, Any
     nb = job_ref["notebook_id"]
     out = []
     async with _context(cfg) as c:
+        # One listing, matched by task id: the artifact objects carry duration_seconds, and asking
+        # the API is cheaper and more accurate than parsing a container for it.
+        durations = {}
+        try:
+            for a in await c.artifacts.list(nb):
+                if getattr(a, "duration_seconds", None):
+                    durations[a.id] = float(a.duration_seconds)
+        except Exception as err:
+            log.info("could not read artifact durations for %s: %s", nb, err)
+
         for kind in job_ref.get("jobs", {}):
             spec = SPECS.get(kind)
             if not spec:
@@ -192,7 +202,8 @@ async def _download(job_ref, dest: Path, cfg, report=None) -> list[dict[str, Any
             if not path.exists():
                 continue
             out.append({"kind": kind, "path": str(path), "mime": mime,
-                        "bytes": path.stat().st_size, "duration": None, "notebook_id": nb})
+                        "bytes": path.stat().st_size, "notebook_id": nb,
+                        "duration": durations.get(job_ref["jobs"][kind])})
             say(f"downloaded {name} ({path.stat().st_size // 1024}k)")
     if not out:
         raise BridgeError("generation reported complete but nothing downloaded")
@@ -348,7 +359,12 @@ def _selfcheck() -> None:
                 delete=lambda nb: _coro(calls.append(f"delete:{nb}"))),
             sources=SimpleNamespace(add_file=add_file, add_url=add_url,
                                     wait_all_until_ready=ready_all),
-            artifacts=SimpleNamespace(poll_status=poll))
+            artifacts=SimpleNamespace(
+                poll_status=poll,
+                list=lambda nb: _coro([
+                    SimpleNamespace(id="t-audio", duration_seconds=1149.88, title="a"),
+                    SimpleNamespace(id="t-video", duration_seconds=467.12, title="v"),
+                    SimpleNamespace(id="t-quiz", duration_seconds=None, title="q")])))
         for kind, spec in SPECS.items():
             async def make(nb, _n=kind, **kw):
                 calls.append(f"generate:{_n}")
@@ -407,6 +423,9 @@ def _selfcheck() -> None:
             got = download(job, Path(td) / "lesson", cfg)
             assert {a["kind"] for a in got} == set(cfg["bridge"]["artifacts"])
             assert all(a["bytes"] > 0 and Path(a["path"]).exists() for a in got)
+            by_kind = {a["kind"]: a for a in got}
+            assert by_kind["audio"]["duration"] == 1149.88, "durations come back with the artifacts"
+            assert by_kind["quiz"]["duration"] is None, "and a quiz simply has none"
 
             # One artifact missing must not cost the lesson its audio.
             globals()["_context"] = fake_client(downloads=("audio",))
