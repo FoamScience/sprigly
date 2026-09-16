@@ -606,3 +606,130 @@ def review_due(cfg: dict, limit: int) -> None:
     graded = _drill(conn, console, cards, cfg)
     console.print(f"[green]✓[/green] graded {graded} of {len(cards)} due")
     conn.close()
+
+
+@main.command()
+@click.argument("goal", required=False)
+@click.option("--depth", type=click.IntRange(1, 5), help="How fine-grained the lessons should be.")
+@click.option("--lang", help="Language for this track's material.")
+@click.option("--only", is_flag=True, help="Offer nothing outside the active tracks.")
+@click.option("--shared", is_flag=True, help="Undo --only.")
+@click.option("--min-evidence", help="peer-reviewed, preprint, institutional, practitioner.")
+@click.option("--off", is_flag=True, help="Deactivate: the named track, or all of them.")
+@click.pass_obj
+def focus(cfg: dict, goal: str | None, depth: int | None, lang: str | None, only: bool,
+          shared: bool, min_evidence: str | None, off: bool) -> None:
+    """Activate a track, re-tune it, or show what is active.
+
+    Several tracks may be active at once — parallel interests are the normal case, and the picker's
+    track-debt signal keeps them advancing fairly without a scheduler. With no arguments this lists
+    the tracks and changes nothing.
+    """
+    from rich.console import Console
+    from rich.table import Table
+
+    from . import store
+
+    console = Console()
+    conn = store.connect(cfg["paths"]["db"])
+
+    if off:
+        if goal:
+            n = conn.execute("UPDATE track SET active=0 WHERE goal=?", (goal,)).rowcount
+            click.echo(f"deactivated {n} track(s) matching {goal!r}")
+        else:
+            conn.execute("UPDATE track SET active=0")
+            click.echo("all tracks deactivated")
+    elif goal:
+        row = conn.execute("SELECT id FROM track WHERE goal=?", (goal,)).fetchone()
+        if row:
+            tid = row["id"]
+            conn.execute("UPDATE track SET active=1 WHERE id=?", (tid,))
+        else:
+            tid = conn.execute(
+                "INSERT INTO track (goal, depth, active, language, min_evidence)"
+                " VALUES (?,?,1,?,?)",
+                (goal, depth or cfg["lesson"]["default_depth"],
+                 lang or cfg["lesson"]["default_language"],
+                 min_evidence or cfg["sources"]["default_min_evidence"])).lastrowid
+            click.echo(f"track {tid}: {goal}")
+        _retune(conn, tid, depth, lang, only, shared, min_evidence)
+    else:
+        targets = [r["id"] for r in conn.execute("SELECT id FROM track WHERE active=1")]
+        if any(v is not None and v is not False for v in (depth, lang, min_evidence)) or only or shared:
+            if not targets:
+                raise click.ClickException("no active track to re-tune — name one")
+            for tid in targets:
+                _retune(conn, tid, depth, lang, only, shared, min_evidence)
+
+    table = Table("id", "goal", "depth", "active", "only", "lang", "evidence", "lessons")
+    for r in conn.execute(
+            "SELECT t.*, (SELECT count(*) FROM lesson l WHERE l.track_id=t.id) AS n,"
+            " (SELECT count(*) FROM lesson l WHERE l.track_id=t.id AND l.state='proposed') AS waiting,"
+            " (SELECT count(*) FROM lesson l WHERE l.track_id=t.id AND l.state='reviewed') AS done"
+            " FROM track t ORDER BY t.active DESC, t.id"):
+        finished = r["n"] and not r["waiting"] and r["done"] == r["n"]
+        table.add_row(str(r["id"]), r["goal"] + ("  [green]done[/green]" if finished else ""),
+                      str(r["depth"]), "yes" if r["active"] else "", "yes" if r["exclusive"] else "",
+                      r["language"], r["min_evidence"], f"{r['done']}/{r['n']}")
+    console.print(table)
+    conn.close()
+
+
+def _retune(conn, track_id: int, depth, lang, only, shared, min_evidence) -> None:
+    """Apply the flags to one track. Changing depth clears pending proposals for it.
+
+    Lessons already reviewed are untouched; only what has not been learned yet is regenerated, so
+    re-tuning granularity never throws away work.
+    """
+    from . import store
+
+    if depth:
+        conn.execute("UPDATE track SET depth=? WHERE id=?", (depth, track_id))
+        stale = conn.execute(
+            "SELECT id FROM lesson WHERE track_id=? AND state='proposed'", (track_id,)).fetchall()
+        for r in stale:
+            conn.execute("UPDATE lesson SET state='expired' WHERE id=?", (r["id"],))
+            store.log_event(conn, "expired", r["id"], '{"why": "depth changed"}')
+        if stale:
+            click.echo(f"depth {depth}; dropped {len(stale)} pending proposal(s) —"
+                       f" run `sprigly curate --track {track_id}` to redecompose")
+    if lang:
+        conn.execute("UPDATE track SET language=? WHERE id=?", (lang, track_id))
+    if min_evidence:
+        conn.execute("UPDATE track SET min_evidence=? WHERE id=?", (min_evidence, track_id))
+    if only:
+        conn.execute("UPDATE track SET exclusive=1 WHERE id=?", (track_id,))
+    if shared:
+        conn.execute("UPDATE track SET exclusive=0 WHERE id=?", (track_id,))
+
+
+@main.command()
+@click.argument("lesson_id", type=int)
+@click.option("-n", type=int, help="How many children to ask for.")
+@click.pass_obj
+def deeper(cfg: dict, lesson_id: int, n: int | None) -> None:
+    """Split a lesson into finer children, one depth level down."""
+    from rich.console import Console
+
+    from . import curator, store
+
+    console = Console()
+    _echo_warnings(console)
+    conn = store.connect(cfg["paths"]["db"])
+    status = console.status("[dim]decomposing[/dim]", spinner="dots")
+
+    def say(msg: str) -> None:
+        console.print(f"   [dim]{msg}[/dim]")
+        status.update(f"[cyan]{msg[:70]}[/cyan]")
+
+    status.start()
+    try:
+        ids = curator.deepen(conn, cfg, lesson_id, n, report=say)
+    except curator.CuratorError as err:
+        raise click.ClickException(str(err))
+    finally:
+        status.stop()
+    console.print(f"[green]✓[/green] {len(ids)} finer lessons under {lesson_id}"
+                  f" — run `sprigly next` to pick one")
+    conn.close()

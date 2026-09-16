@@ -402,12 +402,19 @@ once** — parallel interests are the normal case, not an edge case, and track d
 advancing fairly without a scheduler.
 
 ```bash
-sprigly focus "meshless methods" --depth 5 --lang en
-sprigly focus --depth 4                       # re-tune the active track
+sprigly focus                                 # list tracks, change nothing
+sprigly focus "meshless methods" --depth 5 --lang en --min-evidence preprint
+sprigly focus --depth 4                       # re-tune every active track
 sprigly focus --only                          # offer nothing outside the active tracks
+sprigly focus --shared                        # undo --only
 sprigly focus --off "meshless methods"        # deactivate one
 sprigly focus --off                           # deactivate all
+sprigly deeper 12                             # split lesson 12 into finer children
 ```
+
+Changing a track's depth **expires its pending proposals** and says so, so the next
+`sprigly curate --track N` redecomposes at the new granularity. Lessons already reviewed are
+untouched: re-tuning granularity never throws away work.
 
 `--only` filters **new candidates** and never suppresses due reviews. Reviews are scheduled work,
 not exploration; hiding them to honour a focus flag is how a spaced-repetition queue quietly rots.

@@ -301,6 +301,44 @@ def ask(prompt: str, cfg: dict, role: str = "bulk", runner=run_agent, on_retry=N
     raise CuratorError(f"agent returned unusable output {attempt} times: {last}")
 
 
+def _write_lessons(conn, cfg, items, track_id, language, parent_id=None) -> list[int]:
+    ids = []
+    for it in items:
+        lid = conn.execute(
+            "INSERT INTO lesson (topic, domain, track_id, parent_id, depth, language, est_minutes)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (it["topic"], tags.normalize(it["domain"]) or None, track_id, parent_id,
+             it["depth"], language, it["est_minutes"])).lastrowid
+        tags.write(conn, lid, it["tags"], "tag", cfg)
+        tags.write(conn, lid, it["prereqs"], "prereq", cfg)
+        store.log_event(conn, "proposed", lid, json.dumps({"why": it["why"], "parent": parent_id}))
+        ids.append(lid)
+    return ids
+
+
+def deepen(conn: sqlite3.Connection, cfg: dict, lesson_id: int, n: int | None = None,
+           runner=run_agent, report=None) -> list[int]:
+    """Split one lesson into finer children, one depth level down.
+
+    This is the knob actually reached for — after hearing a lesson and finding it thin — so it
+    decomposes that lesson's own topic rather than the whole track, and leaves the rest alone.
+    """
+    row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
+    if not row:
+        raise CuratorError(f"no lesson {lesson_id}")
+    depth = min(row["depth"] + 1, 5)
+    if depth == row["depth"]:
+        raise CuratorError(f"lesson {lesson_id} is already at depth 5, the finest grain there is")
+    ctx = _context(conn, cfg, row["track_id"])
+    prompt = render("syllabus", goal=row["topic"], depth=depth,
+                    scope=cfg["depth"][str(depth)]["scope"],
+                    n=n or cfg["lesson"]["max_syllabus"], **ctx)
+    items = ask(prompt, cfg, "judgement", runner, report=report)
+    for it in items:
+        it["depth"] = depth
+    return _write_lessons(conn, cfg, items, row["track_id"], row["language"], parent_id=lesson_id)
+
+
 def _context(conn: sqlite3.Connection, cfg: dict, track_id: int | None) -> dict:
     scope = " AND track_id=?" if track_id else ""
     args = (track_id,) if track_id else ()
@@ -347,17 +385,7 @@ def propose(conn: sqlite3.Connection, cfg: dict, track_id: int | None = None,
     """Write proposed lessons. Focused on a track it decomposes; otherwise it prospects."""
     prompt, role, language = build_prompt(conn, cfg, track_id, n)
     items = ask(prompt, cfg, role, runner, on_retry, report=report)
-    ids = []
-    for it in items:
-        lid = conn.execute(
-            "INSERT INTO lesson (topic, domain, track_id, depth, language, est_minutes)"
-            " VALUES (?,?,?,?,?,?)",
-            (it["topic"], tags.normalize(it["domain"]) or None, track_id,
-             it["depth"], language, it["est_minutes"])).lastrowid
-        tags.write(conn, lid, it["tags"], "tag", cfg)
-        tags.write(conn, lid, it["prereqs"], "prereq", cfg)
-        store.log_event(conn, "proposed", lid, json.dumps({"why": it["why"]}))
-        ids.append(lid)
+    ids = _write_lessons(conn, cfg, items, track_id, language)
     log.info("curator proposed %d lessons for track %s", len(ids), track_id)
     return ids
 
@@ -490,6 +518,40 @@ def _selfcheck() -> None:
     assert "--output-format" in _argv("claude", "m", "p", streaming=True)
     assert _argv("claude", "m", "p", streaming=False) == ["claude", "-p", "p", "--model", "m"], \
         "without a reporter the call stays a plain blocking one"
+
+    # A lesson can be split into finer children without disturbing the rest of its track.
+    with tempfile.TemporaryDirectory() as td2:
+        root2 = Path(td2)
+        cfg2 = config.load(path=root2 / "absent.toml", root=root2)
+        conn2 = store.connect(cfg2["paths"]["db"])
+        t2 = conn2.execute("INSERT INTO track (goal, depth) VALUES ('meshless methods', 3)").lastrowid
+        parent = conn2.execute(
+            "INSERT INTO lesson (topic, track_id, depth, language)"
+            " VALUES ('how rbf-fd builds a stencil', ?, 3, 'en')", (t2,)).lastrowid
+        seen2 = {}
+
+        def child(prompt, cfg, role, report=None, timeout=None):
+            seen2["prompt"] = prompt
+            return ('[{"topic": "choosing the shape parameter", "domain": "numerics",'
+                    ' "depth": 2, "tags": ["shape-parameter"], "prereqs": []}]')
+
+        kids = deepen(conn2, cfg2, parent, runner=child)
+        assert "how rbf-fd builds a stencil" in seen2["prompt"], "it decomposes the lesson, not the track"
+        assert "a single design decision inside a method" in seen2["prompt"], "one level finer"
+        got = conn2.execute("SELECT parent_id, depth, track_id FROM lesson WHERE id=?",
+                            (kids[0],)).fetchone()
+        assert got["parent_id"] == parent, "children hang off the lesson they refine"
+        assert got["depth"] == 4, "the agent's own depth is overridden by the level asked for"
+        assert got["track_id"] == t2, "and stay in the same track"
+
+        deep = conn2.execute(
+            "INSERT INTO lesson (topic, depth) VALUES ('already fine', 5)").lastrowid
+        try:
+            deepen(conn2, cfg2, deep, runner=child)
+            raise AssertionError("depth 5 is the finest grain there is")
+        except CuratorError as err:
+            assert "already at depth 5" in str(err)
+        conn2.close()
 
     try:
         render("prospect", n=1)
