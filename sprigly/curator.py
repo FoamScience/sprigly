@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import store, tags
+from . import refs, store, tags
 
 log = logging.getLogger(__name__)
 PROMPTS = Path(__file__).parent / "prompts"
@@ -309,6 +309,8 @@ def _write_lessons(conn, cfg, items, track_id, language, parent_id=None) -> list
             " VALUES (?,?,?,?,?,?,?)",
             (it["topic"], tags.normalize(it["domain"]) or None, track_id, parent_id,
              it["depth"], language, it["est_minutes"])).lastrowid
+        conn.execute("UPDATE lesson SET slug=? WHERE id=?",
+                     (refs.for_lesson(conn, it["topic"], track_id, lid), lid))
         tags.write(conn, lid, it["tags"], "tag", cfg)
         tags.write(conn, lid, it["prereqs"], "prereq", cfg)
         store.log_event(conn, "proposed", lid, json.dumps({"why": it["why"], "parent": parent_id}))

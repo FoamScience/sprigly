@@ -149,6 +149,14 @@ MIGRATIONS: list[tuple[int, str]] = [
     -- and nothing about them has changed.
     ALTER TABLE lesson ADD COLUMN artifacts TEXT;
     """),
+    (3, """
+    -- Human-facing identifiers. The integer primary key stays: it is stable, it is what foreign
+    -- keys point at, and a slug that changes when a topic is renamed must not break the graph.
+    ALTER TABLE lesson ADD COLUMN slug TEXT;
+    ALTER TABLE track ADD COLUMN slug TEXT;
+    CREATE UNIQUE INDEX lesson_slug_idx ON lesson(slug) WHERE slug IS NOT NULL;
+    CREATE UNIQUE INDEX track_slug_idx ON track(slug) WHERE slug IS NOT NULL;
+    """),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -176,6 +184,9 @@ def connect(path: Path | str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
     migrate(conn)
+    from . import refs  # imported here: refs needs a connected store, not the other way round
+
+    refs.backfill(conn)
     return conn
 
 
@@ -205,7 +216,7 @@ def counts_by_state(conn: sqlite3.Connection) -> dict[str, int]:
 def troubled(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Lessons that failed outright, or are parked mid-retry."""
     return conn.execute(
-        "SELECT id, topic, state, retry_count, next_attempt_at, last_error FROM lesson"
+        "SELECT id, slug, topic, state, retry_count, next_attempt_at, last_error FROM lesson"
         " WHERE last_error IS NOT NULL AND state != 'reviewed' ORDER BY state, id").fetchall()
 
 

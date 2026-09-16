@@ -56,7 +56,7 @@ Single file under `$XDG_DATA_HOME/sprigly/` (falling back to `~/.local/share`), 
 
 - `track` — a milestone *and* the focus mechanism: `goal`, `status`, `depth` (1-5), `active`,
   `exclusive`, `min_evidence`, `language`. **Several tracks may be active at once.**
-- `lesson` — `topic`, `track_id?`, `parent_id?`, `depth`, `state`, `score`, `language`,
+- `lesson` — `slug`, `topic`, `track_id?`, `parent_id?`, `depth`, `state`, `score`, `language`,
   `est_minutes`, `actual_minutes`, `thin`, `job_ref`, `polled_at`, `retry_count`, `last_error`,
   `next_attempt_at`, timestamps.
 - `source` — `url`, `doi`, `tier`, `evidence_level`, `local_path`, `retracted`, `oa_status`.
@@ -462,6 +462,20 @@ it spends no generation quota.
 
 The same rebuilt notebook is what a live audio or video session would attach to; `notebooklm-py`
 does not expose those yet, and `notebooks.get_share_url` is already wired for when it does.
+
+### Naming things
+
+Integers are a lookup table you have to keep in your head, so every lesson and track also carries a
+**slug**: `cognitive-load-theory-interface`, or `meshless-methods.rbf-fd-stencil-construction` for
+a lesson inside a track. Filler words are dropped, the name is capped at four words, and a lesson
+is never named after its own track twice.
+
+The integer primary key stays. It is stable, foreign keys point at it, and renaming a topic must
+not break the graph — the slug is a second name resolved on the way in, not a replacement.
+
+Every command that takes a lesson accepts the id, the exact slug, a unique prefix, or a unique
+substring: `sprigly status rbf-fd-stencil` is enough. An ambiguous reference is an error that names
+the candidates, because silently picking one is how you grade the wrong lesson.
 
 ## Configuration
 

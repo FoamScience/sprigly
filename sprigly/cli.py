@@ -68,9 +68,10 @@ def show_config(cfg: dict) -> None:
 
 
 @main.command()
-@click.option("--lesson", type=int, help="Advance only this lesson, ignoring its backoff window.")
+@click.option("--lesson", "lesson_ref", metavar="LESSON",
+              help="Advance only this lesson, ignoring its backoff window.")
 @click.pass_obj
-def tick(cfg: dict, lesson: int | None) -> None:
+def tick(cfg: dict, lesson_ref: str | None) -> None:
     """Advance every lesson one step. Safe to run from a timer."""
     from . import store, tick as ticker
 
@@ -83,6 +84,7 @@ def tick(cfg: dict, lesson: int | None) -> None:
             click.echo("another tick is running")
             return
         conn = store.connect(cfg["paths"]["db"])
+        lesson = _ref(conn, lesson_ref) if lesson_ref else None
         started = time.monotonic()
         status = console.status("[dim]scanning[/dim]", spinner="dots")
 
@@ -120,9 +122,9 @@ def tick(cfg: dict, lesson: int | None) -> None:
 
 
 @main.command()
-@click.argument("lesson_id", type=int, required=False)
+@click.argument("lesson_ref", metavar="LESSON", required=False)
 @click.pass_obj
-def status(cfg: dict, lesson_id: int | None) -> None:
+def status(cfg: dict, lesson_ref: str | None) -> None:
     """Pipeline state, parked failures and review load. With an id, inspect one lesson."""
     from rich.console import Console
     from rich.table import Table
@@ -132,8 +134,8 @@ def status(cfg: dict, lesson_id: int | None) -> None:
     conn = store.connect(cfg["paths"]["db"])
     console = Console()
 
-    if lesson_id is not None:
-        _show_lesson(conn, cfg, console, lesson_id)
+    if lesson_ref is not None:
+        _show_lesson(conn, cfg, console, _ref(conn, lesson_ref))
         conn.close()
         return
 
@@ -146,9 +148,10 @@ def status(cfg: dict, lesson_id: int | None) -> None:
 
     rows = store.troubled(conn)
     if rows:
-        t = Table("id", "topic", "state", "tries", "next try", "error", title="needs attention")
+        t = Table("lesson", "topic", "state", "tries", "next try", "error",
+                  title="needs attention")
         for r in rows:
-            t.add_row(str(r["id"]), r["topic"], r["state"], str(r["retry_count"]),
+            t.add_row(r["slug"] or str(r["id"]), r["topic"], r["state"], str(r["retry_count"]),
                       r["next_attempt_at"] or "-", (r["last_error"] or "")[:60])
         console.print(t)
 
@@ -164,7 +167,8 @@ def _choose(menu: list, cfg: dict) -> list[int]:
     keep working rather than blowing up inside the subprocess.
     """
     lines = [f"{i:>2}  {o.kind:<6} {o.candidate.domain:<15} {o.candidate.est_minutes:>3}m "
-             f"{o.score:.2f}  {o.candidate.topic}   [{_why(o, cfg)}]"
+             f"{o.score:.2f}  {o.candidate.topic}"
+             f"   ({o.candidate.slug or o.candidate.id})   [{_why(o, cfg)}]"
              for i, o in enumerate(menu, 1)]
     if sys.stdin.isatty() and sys.stdout.isatty():
         from iterfzf import iterfzf
@@ -176,9 +180,9 @@ def _choose(menu: list, cfg: dict) -> list[int]:
     from rich.console import Console
     from rich.table import Table
 
-    table = Table("#", "kind", "topic", "domain", "min", "score", "why")
+    table = Table("#", "kind", "lesson", "domain", "min", "score", "why")
     for i, o in enumerate(menu, 1):
-        table.add_row(str(i), o.kind, o.candidate.topic, o.candidate.domain,
+        table.add_row(str(i), o.kind, o.candidate.slug or o.candidate.topic, o.candidate.domain,
                       str(o.candidate.est_minutes), f"{o.score:.2f}", _why(o, cfg))
     Console().print(table)
     raw = click.prompt("pick", default="", show_default=False,
@@ -242,7 +246,8 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
         if taken.kind == "new":
             conn.execute("UPDATE lesson SET state='picked', score=?, updated_at=? WHERE id=?",
                          (taken.score, store.utcnow(), taken.candidate.id))
-            click.echo(f"picked {taken.candidate.id}: {taken.candidate.topic}"
+            name = taken.candidate.slug or taken.candidate.id
+            click.echo(f"picked {name}: {taken.candidate.topic}"
                        f" — run `sprigly tick` to harvest and generate it")
         else:
             click.echo(f"review {taken.candidate.id}: {taken.candidate.topic}")
@@ -302,11 +307,11 @@ def curate(cfg: dict, track: int | None, n: int | None, lang: str | None, dry_ru
             status.stop()
 
         console.print(f"[green]✓[/green] {len(ids)} proposed in {time.monotonic() - started:.0f}s")
-        table = Table("id", "topic", "domain", "depth", box=None, pad_edge=False)
+        table = Table("lesson", "topic", "domain", "depth", box=None, pad_edge=False)
         for r in conn.execute(
-                f"SELECT id, topic, COALESCE(domain,'') AS domain, depth FROM lesson"
+                f"SELECT id, slug, topic, COALESCE(domain,'') AS domain, depth FROM lesson"
                 f" WHERE id IN ({','.join('?' * len(ids))})", ids):
-            table.add_row(str(r["id"]), r["topic"], r["domain"], str(r["depth"]))
+            table.add_row(r["slug"] or str(r["id"]), r["topic"], r["domain"], str(r["depth"]))
         console.print(table)
         console.print("[dim]run `sprigly next` to pick a lesson[/dim]")
     conn.close()
@@ -320,7 +325,8 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
     if not row:
         raise click.ClickException(f"no lesson {lesson_id}")
 
-    console.print(f"[bold]{row['id']}  {row['topic']}[/bold]  [cyan]{row['state']}[/cyan]")
+    console.print(f"[bold]{row['slug'] or row['id']}[/bold]  {row['topic']}"
+                  f"  [cyan]{row['state']}[/cyan]  [dim]#{row['id']}[/dim]")
     facts = Table(box=None, show_header=False, pad_edge=False)
     for label, value in (
             ("domain", row["domain"]), ("track", row["track_id"]), ("depth", row["depth"]),
@@ -377,13 +383,13 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
 
 
 @main.command()
-@click.argument("lesson_id", type=int)
+@click.argument("lesson_ref", metavar="LESSON")
 @click.option("--from", "stage", type=click.Choice(["harvest", "upload", "freshen"]),
               default="harvest",
               show_default=True, help="Which phase to run again.")
 @click.option("--lang", help="Regenerate in this language, e.g. de.")
 @click.pass_obj
-def redo(cfg: dict, lesson_id: int, stage: str, lang: str | None) -> None:
+def redo(cfg: dict, lesson_ref: str, stage: str, lang: str | None) -> None:
     """Rewind a lesson so the next tick re-runs a phase.
 
     `--from harvest` throws away its sources and brief and searches again. `--from upload` keeps the
@@ -410,10 +416,10 @@ def redo(cfg: dict, lesson_id: int, stage: str, lang: str | None) -> None:
 
 
 @main.command()
-@click.argument("lesson_id", type=int)
+@click.argument("lesson_ref", metavar="LESSON")
 @click.argument("question", nargs=-1, required=True)
 @click.pass_obj
-def ask(cfg: dict, lesson_id: int, question: tuple[str, ...]) -> None:
+def ask(cfg: dict, lesson_ref: str, question: tuple[str, ...]) -> None:
     """Ask a question about a lesson, answered from its own sources.
 
     Notebooks are deleted once their artifacts are downloaded, so the first question about an older
@@ -428,9 +434,8 @@ def ask(cfg: dict, lesson_id: int, question: tuple[str, ...]) -> None:
     console = Console()
     _echo_warnings(console)
     conn = store.connect(cfg["paths"]["db"])
+    lesson_id = _ref(conn, lesson_ref)
     row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
-    if not row:
-        raise click.ClickException(f"no lesson {lesson_id}")
 
     notebook = row["notebook_id"]
     if not notebook or not bridge.alive(notebook, cfg):
@@ -455,6 +460,18 @@ def ask(cfg: dict, lesson_id: int, question: tuple[str, ...]) -> None:
     conn.close()
 
 
+def _ref(conn, ref: str, table: str = "lesson") -> int:
+    """Resolve what the user typed, turning an ambiguous reference into a useful error."""
+    from . import refs
+
+    try:
+        return refs.resolve(conn, ref, table)
+    except refs.Ambiguous as err:
+        raise click.ClickException(str(err)) from None
+    except LookupError as err:
+        raise click.ClickException(str(err)) from None
+
+
 def _mark_consumed(conn, lesson_id: int, via: str) -> bool:
     """Move a ready lesson on. Returns whether it actually moved."""
     from . import store
@@ -471,11 +488,11 @@ def _mark_consumed(conn, lesson_id: int, via: str) -> bool:
 
 
 @main.command()
-@click.argument("lesson_id", type=int)
+@click.argument("lesson_ref", metavar="LESSON")
 @click.option("--kind", default="audio", show_default=True,
               help="Which artifact to open: audio, video, slides, quiz.")
 @click.pass_obj
-def play(cfg: dict, lesson_id: int, kind: str) -> None:
+def play(cfg: dict, lesson_ref: str, kind: str) -> None:
     """Open a lesson's artifact and record that you consumed it.
 
     This is the machine-side counterpart of deleting the file on the phone. Opening is taken as
@@ -487,6 +504,7 @@ def play(cfg: dict, lesson_id: int, kind: str) -> None:
     from . import store
 
     conn = store.connect(cfg["paths"]["db"])
+    lesson_id = _ref(conn, lesson_ref)
     art = conn.execute("SELECT path FROM artifact WHERE lesson_id=? AND kind=?",
                        (lesson_id, kind)).fetchone()
     if not art:
@@ -510,15 +528,16 @@ def play(cfg: dict, lesson_id: int, kind: str) -> None:
 
 
 @main.command()
-@click.argument("lesson_id", type=int)
+@click.argument("lesson_ref", metavar="LESSON")
 @click.option("--rating", type=click.IntRange(1, 5), help="How useful it was, 1 to 5.")
 @click.option("--note", default="", help="Anything worth remembering about it.")
 @click.pass_obj
-def done(cfg: dict, lesson_id: int, rating: int | None, note: str) -> None:
+def done(cfg: dict, lesson_ref: str, rating: int | None, note: str) -> None:
     """Record what you thought of a lesson, and mark it consumed if it was not already."""
     from . import store
 
     conn = store.connect(cfg["paths"]["db"])
+    lesson_id = _ref(conn, lesson_ref)
     _mark_consumed(conn, lesson_id, "done")
     store.log_event(conn, "rated", lesson_id,
                     _json.dumps({"rating": rating, "note": note.strip() or None}))
@@ -554,9 +573,9 @@ def _drill(conn, console, cards, cfg) -> int:
 
 
 @main.command()
-@click.argument("lesson_id", type=int)
+@click.argument("lesson_ref", metavar="LESSON")
 @click.pass_obj
-def quiz(cfg: dict, lesson_id: int) -> None:
+def quiz(cfg: dict, lesson_ref: str) -> None:
     """Work through a lesson's questions and schedule them for review.
 
     The questions come from NotebookLM, generated from the same sources as the lesson. Grading is
@@ -568,9 +587,7 @@ def quiz(cfg: dict, lesson_id: int) -> None:
 
     console = Console()
     conn = store.connect(cfg["paths"]["db"])
-    if not conn.execute("SELECT 1 FROM lesson WHERE id=?", (lesson_id,)).fetchone():
-        raise click.ClickException(f"no lesson {lesson_id}")
-
+    lesson_id = _ref(conn, lesson_ref)
     added = review.import_cards(conn, cfg, lesson_id)
     if added:
         console.print(f"[dim]imported {added} cards[/dim]")
@@ -707,10 +724,10 @@ def _retune(conn, track_id: int, depth, lang, only, shared, min_evidence) -> Non
 
 
 @main.command()
-@click.argument("lesson_id", type=int)
+@click.argument("lesson_ref", metavar="LESSON")
 @click.option("-n", type=int, help="How many children to ask for.")
 @click.pass_obj
-def deeper(cfg: dict, lesson_id: int, n: int | None) -> None:
+def deeper(cfg: dict, lesson_ref: str, n: int | None) -> None:
     """Split a lesson into finer children, one depth level down."""
     from rich.console import Console
 
@@ -719,6 +736,7 @@ def deeper(cfg: dict, lesson_id: int, n: int | None) -> None:
     console = Console()
     _echo_warnings(console)
     conn = store.connect(cfg["paths"]["db"])
+    lesson_id = _ref(conn, lesson_ref)
     status = console.status("[dim]decomposing[/dim]", spinner="dots")
 
     def say(msg: str) -> None:

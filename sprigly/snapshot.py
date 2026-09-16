@@ -24,6 +24,7 @@ class Candidate:
     est_minutes: int = 20
     track_id: int | None = None
     evidence_level: str | None = None
+    slug: str | None = None
 
 
 @dataclass
@@ -149,7 +150,7 @@ def load(conn: sqlite3.Connection, cfg: dict, now: str | None = None) -> Snapsho
 
 
 CANDIDATE_COLS = """
-SELECT l.id, l.topic, COALESCE(l.domain,'') AS domain, l.est_minutes, l.track_id,
+SELECT l.id, l.slug, l.topic, COALESCE(l.domain,'') AS domain, l.est_minutes, l.track_id,
        (SELECT group_concat(tag) FROM lesson_tag WHERE lesson_id=l.id AND kind='tag')  AS tags,
        (SELECT group_concat(tag) FROM lesson_tag WHERE lesson_id=l.id AND kind='prereq') AS prereqs,
        (SELECT s.evidence_level FROM source s JOIN lesson_source ls ON ls.source_id=s.id
@@ -164,7 +165,7 @@ def _to_candidate(r: sqlite3.Row) -> Candidate:
         tags=frozenset((r["tags"] or "").split(",")) - {""},
         prereqs=frozenset((r["prereqs"] or "").split(",")) - {""},
         est_minutes=r["est_minutes"] or 20,
-        track_id=r["track_id"], evidence_level=r["evidence_level"],
+        track_id=r["track_id"], evidence_level=r["evidence_level"], slug=r["slug"],
     )
 
 
