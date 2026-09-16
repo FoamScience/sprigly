@@ -16,6 +16,30 @@ from . import config
 log = logging.getLogger(__name__)
 
 
+class _ConsoleWarnings(logging.Handler):
+    """Mirror warnings to the terminal while a command runs.
+
+    The file log is the record; a long command that silently drops sources is the problem. Only
+    WARNING and above, so the console stays readable.
+    """
+
+    def __init__(self, console) -> None:
+        super().__init__(level=logging.WARNING)
+        self.console = console
+
+    def emit(self, record: logging.LogRecord) -> None:
+        mark = "[red]![/red]" if record.levelno >= logging.ERROR else "[yellow]![/yellow]"
+        self.console.print(f"{mark} [dim]{record.name.removeprefix('sprigly.')}:[/dim] "
+                           f"{record.getMessage()}")
+
+
+def _echo_warnings(console):
+    """Attach the console handler to sprigly's loggers for the duration of a command."""
+    handler = _ConsoleWarnings(console)
+    logging.getLogger("sprigly").addHandler(handler)
+    return handler
+
+
 def _setup_logging(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     logging.Formatter.converter = time.gmtime  # the Z suffix below must not lie
@@ -52,6 +76,7 @@ def tick(cfg: dict) -> None:
     from rich.console import Console
 
     console = Console()
+    _echo_warnings(console)
     with ticker.lock(cfg["paths"]["data"] / "tick.lock") as held:
         if not held:
             click.echo("another tick is running")
@@ -89,9 +114,10 @@ def tick(cfg: dict) -> None:
 
 
 @main.command()
+@click.argument("lesson_id", type=int, required=False)
 @click.pass_obj
-def status(cfg: dict) -> None:
-    """Pipeline state, parked failures and review load."""
+def status(cfg: dict, lesson_id: int | None) -> None:
+    """Pipeline state, parked failures and review load. With an id, inspect one lesson."""
     from rich.console import Console
     from rich.table import Table
 
@@ -99,6 +125,11 @@ def status(cfg: dict) -> None:
 
     conn = store.connect(cfg["paths"]["db"])
     console = Console()
+
+    if lesson_id is not None:
+        _show_lesson(conn, cfg, console, lesson_id)
+        conn.close()
+        return
 
     counts = store.counts_by_state(conn)
     table = Table("state", "lessons", title="pipeline")
@@ -233,6 +264,7 @@ def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
         from rich.table import Table
 
         console = Console()
+        _echo_warnings(console)
         backend = cfg["agent"]["backend"]
         _, role, _ = curator.build_prompt(conn, cfg, track, n)
         model = cfg["agent"]["models"].get(backend, {}).get(role, "?")
@@ -262,3 +294,67 @@ def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
         console.print(table)
         console.print("[dim]run `sprigly next`[/dim]")
     conn.close()
+
+
+def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
+    """What this lesson is carrying, and what the next tick would actually have to work with."""
+    from rich.table import Table
+
+    row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
+    if not row:
+        raise click.ClickException(f"no lesson {lesson_id}")
+
+    console.print(f"[bold]{row['id']}  {row['topic']}[/bold]  [cyan]{row['state']}[/cyan]")
+    facts = Table(box=None, show_header=False, pad_edge=False)
+    for label, value in (
+            ("domain", row["domain"]), ("track", row["track_id"]), ("depth", row["depth"]),
+            ("language", row["language"]),
+            ("minutes", f"est {row['est_minutes']} / actual {row['actual_minutes']}"),
+            ("thin", bool(row["thin"])), ("notebook", row["notebook_id"]),
+            ("retries", row["retry_count"]), ("next try", row["next_attempt_at"]),
+            ("last error", row["last_error"])):
+        if value not in (None, "", 0, False) or label in ("retries", "minutes"):
+            facts.add_row(f"[dim]{label}[/dim]", str(value))
+    console.print(facts)
+
+    for kind in ("tag", "prereq"):
+        vals = [r[0] for r in conn.execute(
+            "SELECT tag FROM lesson_tag WHERE lesson_id=? AND kind=? ORDER BY tag",
+            (lesson_id, kind))]
+        if vals:
+            console.print(f"[dim]{kind}s[/dim] {', '.join(vals)}")
+
+    srcs = conn.execute(
+        "SELECT s.* FROM source s JOIN lesson_source ls ON ls.source_id=s.id"
+        " WHERE ls.lesson_id=? ORDER BY s.tier, s.year DESC", (lesson_id,)).fetchall()
+    if srcs:
+        table = Table("tier", "evidence", "file", "year", "title", title="sources")
+        files = urls = 0
+        for s in srcs:
+            path = Path(s["local_path"]) if s["local_path"] else None
+            if path and path.exists():
+                mark, files = f"[green]{path.stat().st_size // 1024}k[/green]", files + 1
+            elif path:
+                mark = "[red]missing[/red]"
+            else:
+                mark, urls = "[yellow]url only[/yellow]", urls + 1
+            table.add_row(s["tier"], s["evidence_level"], mark, str(s["year"] or "-"),
+                          (s["title"] or s["url"])[:58])
+        console.print(table)
+        # This is what `tick` would hand the bridge: files upload directly, the rest go up as links.
+        console.print(f"[dim]uploadable: {files} file(s) + {urls} url(s) of {len(srcs)}[/dim]")
+
+    note = cfg["paths"]["lessons"] / str(lesson_id) / "brief.md"
+    console.print(f"[dim]brief.md[/dim] {'present' if note.exists() else '[red]absent[/red]'}")
+
+    arts = conn.execute("SELECT kind, path, mime, bytes, duration FROM artifact"
+                        " WHERE lesson_id=? ORDER BY kind", (lesson_id,)).fetchall()
+    if arts:
+        table = Table("kind", "size", "mime", "path", title="artifacts")
+        for a in arts:
+            table.add_row(a["kind"], f"{(a['bytes'] or 0) // 1024}k", a["mime"] or "-",
+                          str(a["path"]))
+        console.print(table)
+
+    if row["job_ref"]:
+        console.print(f"[dim]jobs[/dim] {row['job_ref']}")

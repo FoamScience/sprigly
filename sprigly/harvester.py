@@ -65,6 +65,27 @@ def _slug(text: str, limit: int = 60) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:limit] or "source"
 
 
+def _is_pdf(head: bytes) -> bool:
+    """A PDF starts with %PDF. Publishers answer pdf_url with paywall and consent pages that are
+    perfectly valid HTML, and saving one under a .pdf name feeds NotebookLM an error page as a
+    source — which looks like a successful harvest right up until the podcast is about nothing."""
+    return head.lstrip()[:4] == b"%PDF"
+
+
+def _save_text(w: Work, dest: Path, text: str, cfg: dict) -> str | None:
+    """Extracted prose is only worth keeping if there is enough of it to teach from.
+
+    A landing page yields an abstract and a cookie banner. Below the floor the source is better
+    sent to NotebookLM as a URL, which can do its own retrieval, than as a stub file."""
+    limit = cfg["sources"]["max_bytes"]
+    if len(text) < cfg["sources"]["min_text_bytes"]:
+        log.info("only %d chars extracted from %s, sending it as a url instead", len(text), w.url)
+        return None
+    path = dest / f"{_slug(w.title)}.txt"
+    path.write_text(f"# {w.title}\n\nSource: {w.url}\n\n{text[:limit]}")
+    return str(path)
+
+
 def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
     """Pull the source down so the bridge uploads a file, not a URL.
 
@@ -78,22 +99,32 @@ def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
     stem = _slug(w.title)
 
     if w.pdf_url:
+        path = dest / f"{stem}.pdf"
         try:
             with httpx.stream("GET", w.pdf_url, timeout=timeout, follow_redirects=True) as r:
                 r.raise_for_status()
-                path = dest / f"{stem}.pdf"
-                written = 0
+                written, first, ok = 0, True, True
                 with path.open("wb") as fh:
                     for chunk in r.iter_bytes():
+                        if first:
+                            first = False
+                            if not _is_pdf(chunk):
+                                log.warning("%s answered with %s, not a pdf", w.pdf_url,
+                                            r.headers.get("content-type", "unknown content"))
+                                ok = False
+                                break
                         written += len(chunk)
                         if written > limit:
-                            log.info("%s exceeds max_bytes, abandoning", w.pdf_url)
-                            path.unlink(missing_ok=True)
-                            return None
+                            log.warning("%s exceeds max_bytes, abandoning", w.pdf_url)
+                            ok = False
+                            break
                         fh.write(chunk)
-            return str(path)
+            if ok and written:
+                return str(path)
+            path.unlink(missing_ok=True)
         except Exception as err:
-            log.info("pdf fetch failed for %s: %s", w.pdf_url, err)
+            log.warning("pdf fetch failed for %s: %s", w.pdf_url, err)
+            path.unlink(missing_ok=True)
 
     try:
         import trafilatura
@@ -101,13 +132,9 @@ def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
         raw = trafilatura.fetch_url(w.url)
         text = trafilatura.extract(raw) if raw else None
     except Exception as err:
-        log.info("html extract failed for %s: %s", w.url, err)
+        log.warning("html extract failed for %s: %s", w.url, err)
         text = None
-    if not text:
-        return None
-    path = dest / f"{stem}.txt"
-    path.write_text(f"# {w.title}\n\nSource: {w.url}\n\n{text[:limit]}")
-    return str(path)
+    return _save_text(w, dest, text, cfg) if text else None
 
 
 def brief(topic: str, depth: int, kept: list[Work], admission: gate.Admission, cfg: dict) -> str:
@@ -184,6 +211,18 @@ def _selfcheck() -> None:
     assert len(kept) == 2, "an agent that rejects everything is not believed"
 
     assert rank_relevance("x", depth, [], cfg, boom) == ([], []), "no candidates, no agent call"
+
+    # A publisher answering pdf_url with a consent page is the common case, not an edge one.
+    assert _is_pdf(b"%PDF-1.5\n...")
+    assert _is_pdf(b"\n  %PDF-1.4")
+    assert not _is_pdf(b"<!DOCTYPE html>\n<html>")
+    assert not _is_pdf(b"")
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        assert _save_text(on_topic, d, "x" * 50, cfg) is None, "a stub extraction is not a source"
+        kept = _save_text(on_topic, d, "x" * (cfg["sources"]["min_text_bytes"] + 10), cfg)
+        assert kept and Path(kept).exists() and Path(kept).suffix == ".txt"
 
     with tempfile.TemporaryDirectory() as td:
         dest = Path(td) / "lessons" / "1" / "sources"

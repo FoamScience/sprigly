@@ -97,6 +97,8 @@ DEFAULTS: dict[str, Any] = {
         "min_sources": 2,
         "default_min_evidence": "peer-reviewed",
         "max_bytes": 20_000_000,
+        # Below this many characters an extraction is a landing page, not a paper.
+        "min_text_bytes": 6_000,
         "fetch_timeout_seconds": 30,
     },
     "bridge": {
