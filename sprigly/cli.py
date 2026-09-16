@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import click
@@ -95,8 +96,8 @@ def status(cfg: dict) -> None:
     conn.close()
 
 
-def _choose(menu: list, cfg: dict) -> int:
-    """Fuzzy-pick from the menu, falling back to a numbered table.
+def _choose(menu: list, cfg: dict) -> list[int]:
+    """Fuzzy-pick from the menu, falling back to a numbered table. Returns 1-based indices.
 
     fzf needs a terminal on both ends, so a piped or redirected stdin — a script, a test — has to
     keep working rather than blowing up inside the subprocess.
@@ -107,9 +108,9 @@ def _choose(menu: list, cfg: dict) -> int:
     if sys.stdin.isatty() and sys.stdout.isatty():
         from iterfzf import iterfzf
 
-        picked = iterfzf(lines, prompt="pick> ", exact=False,
-                         header="enter to take one, esc to skip all")
-        return int(picked.split()[0]) if picked else 0
+        picked = iterfzf(lines, prompt="pick> ", exact=False, multi=True,
+                         header="tab to mark several, enter to take, esc to skip all")
+        return [int(line.split()[0]) for line in (picked or [])]
 
     from rich.console import Console
     from rich.table import Table
@@ -119,8 +120,13 @@ def _choose(menu: list, cfg: dict) -> int:
         table.add_row(str(i), o.kind, o.candidate.topic, o.candidate.domain,
                       str(o.candidate.est_minutes), f"{o.score:.2f}", _why(o, cfg))
     Console().print(table)
-    return click.prompt("pick", type=click.IntRange(0, len(menu)), default=0,
-                        show_default=False, prompt_suffix=" (0 to skip all): ")
+    raw = click.prompt("pick", default="", show_default=False,
+                       prompt_suffix=" (numbers, comma-separated; empty to skip all): ")
+    out = []
+    for part in str(raw).replace(",", " ").split():
+        if part.isdigit() and 1 <= int(part) <= len(menu):
+            out.append(int(part))
+    return out
 
 
 def _why(offer, cfg: dict) -> str:
@@ -161,18 +167,22 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
         conn.close()
         return
 
+    # One id per invocation, stamped on every event of this offering. Without it the fit cannot
+    # tell which candidates competed against each other, and the choice sets are unrecoverable.
+    choice_set = uuid.uuid4().hex[:12]
     for o in menu:
         store.log_event(conn, "offered", o.candidate.id,
-                        _json.dumps({"kind": o.kind, "score": o.score, "signals": o.signals}))
+                        _json.dumps({"choice_set": choice_set, "kind": o.kind, "score": o.score,
+                                     "signals": o.signals}))
 
-    choice = _choose(menu, cfg)
-    if choice:
-        taken = menu[choice - 1]
-        store.log_event(conn, "picked", taken.candidate.id, _json.dumps({"kind": taken.kind}))
+    for idx in _choose(menu, cfg):
+        taken = menu[idx - 1]
+        store.log_event(conn, "picked", taken.candidate.id,
+                        _json.dumps({"choice_set": choice_set, "kind": taken.kind}))
         if taken.kind == "new":
             conn.execute("UPDATE lesson SET state='picked', score=?, updated_at=? WHERE id=?",
                          (taken.score, store.utcnow(), taken.candidate.id))
-            click.echo(f"picked {taken.candidate.id}: {taken.candidate.topic} — run `sprigly tick`")
+            click.echo(f"picked {taken.candidate.id}: {taken.candidate.topic}")
         else:
             click.echo(f"review {taken.candidate.id}: {taken.candidate.topic}")
     conn.close()

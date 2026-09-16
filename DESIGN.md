@@ -180,13 +180,18 @@ any exist. MEMORIZE shows the optimal schedule is a review *intensity* proportio
 probability — a rate, not a binary due flag — which is what justifies sizing a lane. As one signal
 among six, a due card can be outvoted indefinitely, and fsrs degrades when reviews run late.
 
-`sprigly next` offers the k candidates through a fuzzy picker, logs all k as offered and the taken
-one as picked. **The skips are half the training data.** Without a terminal on both ends — a script,
-a test — it falls back to a numbered table and a prompt rather than failing inside the subprocess.
+`sprigly next` offers the k candidates through a fuzzy picker; Tab marks several, so one offering
+can yield more than one pick. Every candidate shown is logged as offered and every one taken as
+picked, all stamped with the same `choice_set` id — nothing else records which candidates competed
+against each other, and without it the choice sets cannot be reconstructed. **The skips are half the
+training data.** Without a terminal on both ends — a script, a test — it falls back to a numbered
+table accepting comma-separated numbers, rather than failing inside the subprocess.
 
-**Layer 4 — fitting.** Each `next` is one pick out of k with full feature vectors, which is a
+**Layer 4 — fitting.** Each `next` is a pick out of k with full feature vectors, which is a
 top-1-of-k choice; its exact likelihood is the conditional logit (McFadden), equivalently
-Plackett-Luce top-1. No invented ground truth, skips used as real negatives. Because it is linear in
+Plackett-Luce top-1. Multi-pick offerings give a choice set several positives and need an explicit
+decision — independent draws, or an unordered top-m likelihood — since the naive expansion
+double-counts the shared negatives. No invented ground truth, skips used as real negatives. Because it is linear in
 the features, the hand-weighted scorer is not a placeholder — it is the model that gets fitted.
 Keeping the score linear, and scoring pure, are the two properties every later change must preserve.
 
