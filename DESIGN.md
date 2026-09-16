@@ -22,13 +22,13 @@ One thing at a time, taught well. Diverse domains. Small pieces accumulate into 
 
 ## Shape: CLI + a synced folder
 
-**CLI** (Python, uv-managed) as the control plane. No Android app, no web app, **no RSS feed and
-no web server**. Artifacts are files in a folder; Syncthing mirrors that folder to the phone over
-LAN or Tailscale.
+**CLI** (Python, uv-managed) as the control plane. No Android app, no web app, no RSS feed, no web
+server, and nothing synced anywhere. A lesson is a directory on the machine; on the phone it is a
+notebook in the NotebookLM app.
 
-Dropping the feed removes `feedgen`, GUID stability, enclosure lengths, MIME negotiation, a public
-hostname and a server process — none of which were buying anything once podcast delivery stopped
-being the point. A lesson is a directory; anything that opens files can consume it.
+Every delivery mechanism considered — a podcast feed, then a Syncthing projection — existed to
+rebuild something the NotebookLM app already does, and each added a second place where state could
+drift. Both were removed.
 
 Tradeoff accepted: choosing the next lesson requires a terminal.
 
@@ -362,33 +362,25 @@ next day rather than failing it.
 
 Any library or API error parks the lesson with its error text for retry, never aborts the tick.
 
-### 8. Drop and delivery
+### 8. Where lessons are consumed
 
-`data/lessons/<id>/` holds the originals. `data/drop/<slug>/` is a projection of what goes to the
-phone — audio, slides, and a `notes.md` carrying the topic, the framing brief, the source list with
-tiers, and the lesson's evidence level. Syncthing mirrors `data/drop/` and nothing else.
+`data/lessons/<id>/` holds everything: the sources, `brief.md`, the artifacts, and a `notes.md`
+listing the sources with their tiers and the lesson's evidence level, so a lesson directory
+explains itself without the database.
 
-**Deletion is the consumption signal, for any material, not just audio.** When a lesson's drop
-folder is emptied or removed — the podcast app's delete-after-playback, or you deleting a PDF you
-finished — the deletion syncs back and the next tick marks the lesson `consumed`. Verify the
-local-folder plus auto-delete combination during step 0; it is assumed, not confirmed.
+On the machine, `sprigly play <id>` opens an artifact. **On the phone, the NotebookLM app is the
+consumption surface** — its own audio and video players, its own interactive sessions, no files to
+sync and nothing to keep in step. This is why notebooks are never deleted: the app needs them to
+still be there.
 
-Two guards this needs: sprigly's own retention pruning writes a `pruned` event so it is never
-mistaken for consumption, and only the drop projection is ever deleted — originals stay.
+The cost is that the phone reports nothing back. There is no callback, no play position, no
+deletion to observe. So progress is recorded deliberately, on the machine, with
+`sprigly done <id> --rating N --note "…"`.
 
-**There is no auto-advance.** A lesson sits in `ready` until something actually reports back, by
-one of three routes:
-
-- **deletion-sync** — the drop folder's media are gone, so the next tick marks it consumed
-- **`sprigly play <id>`** — opens the artifact with `xdg-open` and records it. Opening counts as
-  consumption because you named the lesson yourself; nothing infers it
-- **`sprigly done <id> --rating N --note "…"`** — records what you thought, and marks it consumed
-  if it was not already
-
-A stalled queue is honest; a fabricated completion is not.
-
-Retention: audio and notes are kept indefinitely (they are small); video is pruned after
-`retention_video_days` (default 30) while its slide deck survives.
+An earlier design mirrored a projection of each lesson to the phone with Syncthing and treated the
+deletion of a file as the signal it had been consumed. It worked, but it existed to reconstruct
+something the NotebookLM app already does better, and it made the phone a second place where state
+could drift. Removed.
 
 ### 9. Feedback and review
 
@@ -494,7 +486,6 @@ One TOML file. Everything below is a knob, and none of it is a code change:
 | Fuzzy picking | `iterfzf` — ships the `fzf` binary in the wheel, so nothing to install separately |
 | Store | stdlib `sqlite3` |
 | Scheduling, locking, backup, logging, paths | stdlib and systemd |
-| Phone delivery | Syncthing (external, no code) |
 | Curator / Harvester | `opencode` or `claude` CLI via `subprocess`, prompts as text files |
 
 ### What is actually new code

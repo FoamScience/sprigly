@@ -149,7 +149,6 @@ DEFAULTS: dict[str, Any] = {
     "paths": {
         "db": "sprigly.db",
         "lessons": "lessons",
-        "drop": "drop",
         "backups": "backups",
         "log": "sprigly.log",
     },

@@ -72,24 +72,19 @@ Once `sprigly tick` exists it runs from a systemd timer, and the same timer shou
 notebooklm auth refresh --quiet
 ```
 
-## Delivery to the phone
+## Where lessons live
 
-Artifacts land in two places. `~/.local/share/sprigly/lessons/<id>/` holds the originals and is
-never touched by delivery. `~/.local/share/sprigly/drop/<id>-<topic>/` is a projection of it —
-audio, slides, and a `notes.md` listing the sources with their tiers and the lesson's evidence
-level. Files are hard-linked where the filesystem allows, so the projection costs no extra disk.
+Everything lands in `~/.local/share/sprigly/lessons/<id>/`: the sources, `brief.md`, the artifacts,
+and a `notes.md` listing the sources with their tiers and the lesson's evidence level.
 
-Share **only the drop folder** with Syncthing, over LAN or Tailscale. Neither machine needs to be
-always on.
+On the machine, `sprigly play <id>` opens one. On the phone, open the lesson's notebook in the
+NotebookLM app — that is why Sprigly never deletes a notebook.
 
-**Deleting a projected file is how you report the lesson as done.** When everything except
-`notes.md` is gone from a lesson's drop folder, the next `sprigly tick` marks it `consumed`. A
-podcast app set to delete after playback does this for you; so does deleting a PDF you finished.
-The originals are untouched either way, and `sprigly play <id>` or `sprigly done <id>` remain
-available on the machine.
+Nothing reports back from the phone, so tell Sprigly yourself:
 
-There is deliberately no auto-advance: a lesson sits in `ready` until something actually reports
-back.
+```bash
+sprigly done 3 --rating 4 --note "good, wanted more on the shape parameter"
+```
 
 ## Step 0 — remaining checks
 
@@ -102,9 +97,8 @@ generate an audio overview and a slide deck, download both — and record:
 2. **What are the per-notebook source cap and the per-account notebook cap?** These decide whether
    notebooks must be deleted after their artifacts are downloaded.
 3. **What container and MIME is the audio actually?** Never assumed; recorded per artifact.
-4. **On the phone:** does the podcast app's local-folder feed plus delete-after-playback actually
-   remove the file, and does Syncthing propagate that deletion back? Sprigly treats deletion as the
-   signal that a lesson was consumed, so this behaviour is load-bearing.
+4. **Account caps:** how many notebooks may exist at once? Nothing deletes them automatically, so
+   this decides how often `sprigly notebooks --prune` is needed.
 
 ## Upstream notes
 
