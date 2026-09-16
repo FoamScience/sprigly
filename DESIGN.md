@@ -139,7 +139,9 @@ weighted sum of:
   proximal development falls out instead of being declared.
 - **track debt** — stale tracks get a boost, which is also what keeps several active tracks
   advancing fairly with no scheduler
-- **effort fit** — `est_minutes` against the day's budget
+- **effort fit** — `est_minutes` against the day's budget. That is the curator's guess, because
+  scoring happens before generation; `actual_minutes` is written afterwards from the audio artifact
+  and never overwrites it. Keeping both is what leaves any evidence of how wrong the estimate was
 - **revealed preference** — a Beta(1,1) posterior per domain, **sampled rather than averaged**. That
   is Thompson sampling: principled exploration for one line, no epsilon to tune, and it stops a
   domain skipped twice from sinking permanently.
@@ -175,7 +177,10 @@ Plackett-Luce top-1. No invented ground truth, skips used as real negatives. Bec
 the features, the hand-weighted scorer is not a placeholder — it is the model that gets fitted.
 Keeping the score linear, and scoring pure, are the two properties every later change must preserve.
 
-Housekeeping: candidates unpicked after `candidate_ttl_days` (default 30) go to `expired`. Mastery
+Housekeeping: candidates unpicked after `candidate_ttl_days` (default 30) go to `expired`, so the
+proposed pool cannot grow without bound. Cold start needs no special case — with no history,
+preference sits at its prior and every other signal is flat, so the ranking falls back to curator
+order. Mastery
 decay comes free from fsrs — a tag counts as mastered while at least one card carrying it is not
 overdue, so there is no second forgetting model.
 

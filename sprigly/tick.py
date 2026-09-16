@@ -113,11 +113,20 @@ def _do_generating(conn, row, cfg) -> str:
     if not bridge.ready(job, cfg):
         _set(conn, row["id"], polled_at=utcnow())
         return "generating"
+    actual = None
     for a in bridge.download(job, _lesson_dir(cfg, row["id"]), cfg):
         conn.execute(
-            "INSERT INTO artifact (lesson_id, kind, path, mime, bytes, notebook_id)"
-            " VALUES (?,?,?,?,?,?)",
-            (row["id"], a["kind"], a["path"], a.get("mime"), a.get("bytes"), a.get("notebook_id")))
+            "INSERT INTO artifact (lesson_id, kind, path, mime, bytes, duration, notebook_id)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (row["id"], a["kind"], a["path"], a.get("mime"), a.get("bytes"), a.get("duration"),
+             a.get("notebook_id")))
+        if a["kind"] == "audio" and a.get("duration"):
+            actual = round(a["duration"] / 60)
+    # The curator's estimate is what scoring saw before generation; keep it, and record what the
+    # lesson actually turned out to be. Overwriting the estimate would erase the only evidence of
+    # how wrong it was.
+    if actual:
+        _set(conn, row["id"], actual_minutes=actual)
     if not cfg["bridge"]["keep_notebooks"]:
         bridge.discard(job, cfg)
     _set(conn, row["id"], state="ready", polled_at=utcnow())
@@ -204,6 +213,9 @@ def _selfcheck() -> None:
         run(conn, cfg)
         assert state_of(lid) == "ready", "generation is polled, not waited on"
         assert conn.execute("SELECT count(*) FROM artifact WHERE lesson_id=?", (lid,)).fetchone()[0] == 2
+        got = conn.execute("SELECT est_minutes, actual_minutes FROM lesson WHERE id=?", (lid,)).fetchone()
+        assert got["actual_minutes"] == 23, "actual length comes from the audio artifact"
+        assert got["est_minutes"] is None, "the estimate is never overwritten by the actual"
         assert conn.execute("SELECT count(*) FROM lesson_source WHERE lesson_id=?", (lid,)).fetchone()[0] == 10
 
         run(conn, cfg)

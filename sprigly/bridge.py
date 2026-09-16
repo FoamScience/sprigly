@@ -25,11 +25,12 @@ def download(job_ref: dict, dest: Path, cfg: dict) -> list[dict[str, Any]]:
     """Fetch the artifacts, returning one record each. Container and MIME come from the download."""
     dest.mkdir(parents=True, exist_ok=True)
     out = []
-    for kind, name, mime in (("audio", "podcast.m4a", "audio/mp4"), ("slides", "slides.pdf", "application/pdf")):
+    for kind, name, mime, secs in (("audio", "podcast.m4a", "audio/mp4", 1380.0),
+                                   ("slides", "slides.pdf", "application/pdf", None)):
         path = dest / name
         path.write_text(f"stub {kind} for {json.dumps(job_ref)}\n")
         out.append({"kind": kind, "path": str(path), "mime": mime, "bytes": path.stat().st_size,
-                    "notebook_id": job_ref.get("notebook_id")})
+                    "duration": secs, "notebook_id": job_ref.get("notebook_id")})
     return out
 
 

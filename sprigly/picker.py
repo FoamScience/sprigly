@@ -347,6 +347,16 @@ def _selfcheck() -> None:
     assert offer(pool, [], s, cfg, random.Random(5))[0].kind == "new", "no reviews, no lane"
     assert len(offer([], due, s, cfg, random.Random(5))) == 2, "reviews alone still offer"
 
+    # --- cold start: no history, no tags, no domains, fewer candidates than slots
+    empty = Snapshot(now=now)
+    bare = [cand(100 + i, domain="") for i in range(3)]
+    menu = offer(bare, [], empty, cfg, random.Random(2))
+    assert len(menu) == 3, "fewer candidates than slots offers all of them"
+    assert len({x.candidate.id for x in menu}) == 3, "no candidate is offered twice"
+    assert all(x.signals["preference"] is not None for x in menu)
+    assert offer([], [], empty, cfg, random.Random(2)) == [], "an empty pool offers nothing"
+    assert all(x.score >= 0 for x in menu)
+
     # --- focus retargets calibration instead of needing a bonus
     focused = Snapshot(now=now, focus_track_ids={1})
     tracked = [cand(80 + i, domain="numerics", tags=[f"t{i}"], track=1) for i in range(4)]
