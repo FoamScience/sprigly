@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import bridge, harvester, store
+from . import bridge, drop, harvester, store
 from .store import TS, utcnow
 
 
@@ -144,6 +144,22 @@ def _do_generating(conn, row, cfg, report=None) -> str:
         bridge.discard(job, cfg)
     _set(conn, row["id"], state="ready", polled_at=utcnow())
     store.log_event(conn, "ready", row["id"])
+    out = drop.project(conn, cfg, row["id"])
+    if report:
+        report(f"dropped to {out}")
+    return "ready"
+
+
+def _do_ready(conn, row, cfg, report=None) -> str:
+    """A ready lesson waits for a consumption signal; it never advances on its own.
+
+    Deletion of the projected files is that signal, whether a podcast app removed them after
+    playback or you deleted a PDF you had finished.
+    """
+    if drop.consumed(conn, cfg, row["id"], row["topic"]):
+        _set(conn, row["id"], state="consumed")
+        store.log_event(conn, "consumed", row["id"], json.dumps({"via": "drop-deleted"}))
+        return "consumed"
     return "ready"
 
 
@@ -152,6 +168,7 @@ HANDLERS = {
     "harvesting": _do_harvesting,
     "uploading": _do_uploading,
     "generating": _do_generating,
+    "ready": _do_ready,
 }
 # `proposed` waits for a human pick; `ready` onwards waits for a consumption signal.
 
@@ -223,6 +240,9 @@ def run(conn, cfg, on_step=None, only: int | None = None) -> Counter:
         expired = expire_candidates(conn, cfg)
         if expired:
             moved["expired"] = expired
+        pruned = drop.prune_video(conn, cfg)
+        if pruned:
+            moved["pruned"] = pruned
     now = utcnow()
     # A lesson advances at most once per pass. Without this, a lesson moved into `uploading` would
     # be picked up again by the `uploading` handler later in the same loop and run the whole
@@ -330,6 +350,16 @@ def _selfcheck() -> None:
 
         run(conn, cfg)
         assert state_of(lid) == "ready", "ready waits for a consumption signal, never auto-advances"
+        dropped = drop.folder(cfg, lid, "rbf-fd stencils")
+        assert (dropped / "notes.md").exists(), "a ready lesson is projected into the drop folder"
+        assert drop.media_left(cfg, lid, "rbf-fd stencils") == 2
+
+        # Deleting what was dropped is what moves it on.
+        for f in dropped.iterdir():
+            if f.name != "notes.md":
+                f.unlink()
+        run(conn, cfg)
+        assert state_of(lid) == "consumed", "deletion is the consumption signal"
 
         # Sources dedup globally: a second lesson on the same topic reuses the rows.
         before = conn.execute("SELECT count(*) FROM source").fetchone()[0]
