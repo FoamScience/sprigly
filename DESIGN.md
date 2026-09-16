@@ -97,12 +97,17 @@ at 5 with exponential backoff via `next_attempt_at`; `sqlite3.Connection.backup(
 
 ### 2. Curator (AI agent)
 
-Two backends, `opencode` and `claude`, invoked as subprocesses. Models are configurable
-throughout; defaults are an OpenRouter free model for cheap bulk passes and Sonnet for judgement
-calls (syllabus decomposition, harvester relevance ranking).
+Two backends, `opencode` and `claude`, invoked as subprocesses. Model ids are **keyed by backend**,
+because they are not interchangeable — opencode wants `provider/model`, the claude CLI wants a short
+alias — and a shared field would silently break the moment the backend changed. A cheap model runs
+the bulk passes; judgement calls (syllabus decomposition, harvester relevance ranking) get a
+stronger one.
 
-Output is requested as JSON and schema-checked. On malformed output, retry twice with the
-validation error appended to the prompt, then fail that tick step.
+Output is requested as JSON and schema-checked. Agents narrate, so asking for bare JSON is
+necessary but never sufficient: the parser finds the array, tracking bracket depth and string
+escapes so that a bracketed aside in the prose does not derail it. Validation **rejects rather than
+repairs** — a malformed proposal is cheap to ask for again — and a retry carries the complaint back
+to the agent. After `max_retries` the tick step fails rather than writing garbage rows.
 
 **Unfocused** it prospects ~8 unrelated candidates. **Focused** it decomposes one topic into an
 ordered syllabus, capped at 25 lessons per decomposition — finer coverage comes from
@@ -371,7 +376,7 @@ One TOML file. Everything below is a knob, and none of it is a code change:
 | Store | stdlib `sqlite3` |
 | Scheduling, locking, backup, logging, paths | stdlib and systemd |
 | Phone delivery | Syncthing (external, no code) |
-| Curator / Harvester | `opencode` or `claude` CLI via `subprocess` |
+| Curator / Harvester | `opencode` or `claude` CLI via `subprocess`, prompts as text files |
 
 ### What is actually new code
 

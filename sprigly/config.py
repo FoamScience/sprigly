@@ -17,10 +17,19 @@ DEFAULTS: dict[str, Any] = {
     "agent": {
         # opencode | claude
         "backend": "opencode",
-        # Cheap model for bulk passes, stronger one for judgement calls.
-        "model_bulk": "openrouter/free",
-        "model_judgement": "sonnet",
+        # Model ids are backend-specific — opencode wants provider/model, the claude CLI wants a
+        # short alias — so they are keyed by backend rather than shared. A cheap model does the
+        # bulk passes; judgement calls (syllabus decomposition, relevance ranking) get a stronger
+        # one. Check available ids with `opencode models`.
+        "models": {
+            "opencode": {
+                "bulk": "opencode/nemotron-3.5-lightning-free",
+                "judgement": "openrouter/anthropic/claude-sonnet-5",
+            },
+            "claude": {"bulk": "haiku", "judgement": "sonnet"},
+        },
         "max_retries": 2,
+        "timeout_seconds": 600,
     },
     "lesson": {
         "default_language": "en",
@@ -165,6 +174,9 @@ def _selfcheck() -> None:
         assert cfg2["lesson"]["default_language"] == "en", "siblings survive a partial override"
         assert cfg2["scoring"]["prereq"] == 0.25, "untouched sections survive"
         assert "diversity" not in cfg2["scoring"], "spread is a calibration constraint, not a signal"
+        backend = cfg2["agent"]["backend"]
+        assert set(cfg2["agent"]["models"][backend]) == {"bulk", "judgement"}, \
+            "the active backend must have a model for both roles"
         assert cfg2["paths"]["db"].name == "other.db"
 
         assert DEFAULTS["lesson"]["budget_minutes"] == 20, "DEFAULTS must not be mutated"

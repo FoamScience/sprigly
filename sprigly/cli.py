@@ -147,3 +147,28 @@ def next(cfg: dict, budget: int | None) -> None:
         else:
             click.echo(f"review {taken.candidate.id}: {taken.candidate.topic}")
     conn.close()
+
+
+@main.command()
+@click.option("--track", type=int, help="Decompose this track instead of prospecting.")
+@click.option("-n", type=int, help="How many lessons to ask for.")
+@click.option("--dry-run", is_flag=True, help="Print the prompt without calling the agent.")
+@click.pass_obj
+def curate(cfg: dict, track: int | None, n: int | None, dry_run: bool) -> None:
+    """Ask the agent for candidate lessons."""
+    from . import curator, store
+
+    conn = store.connect(cfg["paths"]["db"])
+    if dry_run:
+        prompt, role, _ = curator.build_prompt(conn, cfg, track, n)
+        backend = cfg["agent"]["backend"]
+        model = cfg["agent"]["models"].get(backend, {}).get(role, "?")
+        click.echo(f"# backend={backend} role={role} model={model}\n")
+        click.echo(prompt)
+    else:
+        try:
+            ids = curator.propose(conn, cfg, track, n)
+        except curator.CuratorError as err:
+            raise click.ClickException(str(err))
+        click.echo(f"proposed {len(ids)} lessons — run `sprigly next`")
+    conn.close()
