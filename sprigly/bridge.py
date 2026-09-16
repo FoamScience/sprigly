@@ -33,12 +33,14 @@ def _context(cfg: dict):
     return NotebookLMClient.from_storage(timeout=cfg["bridge"]["client_timeout_seconds"])
 
 
-async def _start(topic, paths, urls, instructions, language, depth, cfg) -> dict[str, Any]:
+async def _start(topic, paths, urls, instructions, language, depth, cfg, report=None) -> dict[str, Any]:
     fmt = AUDIO_FORMATS.get(cfg["depth"][str(depth)]["audio"], "DEEP_DIVE")
+    say = report or (lambda _msg: None)
     async with _context(cfg) as c:
         nb = await c.notebooks.create(topic[:100])
+        say(f"notebook {nb.id}")
         try:
-            return await _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg)
+            return await _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg, say)
         except Exception:
             # Anything that fails after create leaves an empty notebook behind, and the account
             # has a cap. Tidy up before the error propagates, then let the lesson park and retry.
@@ -50,7 +52,7 @@ async def _start(topic, paths, urls, instructions, language, depth, cfg) -> dict
             raise
 
 
-async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg) -> dict[str, Any]:
+async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg, say) -> dict[str, Any]:
     import notebooklm
 
     if True:
@@ -58,11 +60,13 @@ async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg) -> 
         for p in paths:
             try:
                 added.append(await c.sources.add_file(nb.id, p))
+                say(f"uploaded {Path(p).name}")
             except Exception as err:
-                log.warning("source %s rejected: %s", p, err)
+                log.warning("source %s rejected: %s", Path(p).name, err)
         for u in urls:
             try:
                 added.append(await c.sources.add_url(nb.id, u))
+                say(f"linked {u[:70]}")
             except Exception as err:
                 log.warning("source %s rejected: %s", u, err)
         if not added:
@@ -70,11 +74,13 @@ async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg) -> 
 
         ids = [s.id for s in added if getattr(s, "id", None)]
         if ids:
+            say(f"waiting for {len(ids)} sources to index")
             # Generating before the sources finish indexing produces an empty artifact.
             await c.sources.wait_all_until_ready(
                 nb.id, ids, timeout=cfg["bridge"]["source_ready_timeout_seconds"])
 
         jobs = {}
+        say("requesting audio, slides and quiz")
         jobs["audio"] = (await c.artifacts.generate_audio(
             nb.id, language=language, instructions=instructions,
             audio_format=getattr(notebooklm.AudioFormat, fmt))).task_id
@@ -86,28 +92,32 @@ async def _fill(c, nb, topic, paths, urls, instructions, language, fmt, cfg) -> 
 
 def start(topic: str, source_paths: list[str], cfg: dict, language: str = "en",
           instructions: str | None = None, urls: list[str] | None = None,
-          depth: int = 3) -> dict[str, Any]:
+          depth: int = 3, report=None) -> dict[str, Any]:
     """Create a notebook, upload the sources, request generation. Returns a job reference."""
-    return asyncio.run(_start(topic, source_paths, urls or [], instructions, language, depth, cfg))
+    return asyncio.run(
+        _start(topic, source_paths, urls or [], instructions, language, depth, cfg, report))
 
 
-async def _ready(job_ref, cfg) -> bool:
+async def _ready(job_ref, cfg, report=None) -> bool:
+    say = report or (lambda _msg: None)
     async with _context(cfg) as c:
+        done = True
         for kind, task in job_ref.get("jobs", {}).items():
             st = await c.artifacts.poll_status(job_ref["notebook_id"], task)
             if st.is_failed:
                 raise BridgeError(f"{kind} generation failed: {st.error or st.error_code}")
-            if not st.is_complete:
-                return False
-    return True
+            say(f"{kind}: {'ready' if st.is_complete else 'still generating'}")
+            done = done and st.is_complete
+    return done
 
 
-def ready(job_ref: dict, cfg: dict) -> bool:
+def ready(job_ref: dict, cfg: dict, report=None) -> bool:
     """Has every requested artifact finished? A failure raises, so the lesson parks and retries."""
-    return asyncio.run(_ready(job_ref, cfg))
+    return asyncio.run(_ready(job_ref, cfg, report))
 
 
-async def _download(job_ref, dest: Path, cfg) -> list[dict[str, Any]]:
+async def _download(job_ref, dest: Path, cfg, report=None) -> list[dict[str, Any]]:
+    say = report or (lambda _msg: None)
     dest.mkdir(parents=True, exist_ok=True)
     nb = job_ref["notebook_id"]
     plan = [("audio", "podcast.m4a", "audio/mp4", "download_audio"),
@@ -129,14 +139,15 @@ async def _download(job_ref, dest: Path, cfg) -> list[dict[str, Any]]:
                 continue
             out.append({"kind": kind, "path": str(path), "mime": mime,
                         "bytes": path.stat().st_size, "duration": None, "notebook_id": nb})
+            say(f"downloaded {name} ({path.stat().st_size // 1024}k)")
     if not out:
         raise BridgeError("generation reported complete but nothing downloaded")
     return out
 
 
-def download(job_ref: dict, dest: Path, cfg: dict) -> list[dict[str, Any]]:
+def download(job_ref: dict, dest: Path, cfg: dict, report=None) -> list[dict[str, Any]]:
     """Fetch the artifacts. Container and MIME come from what actually arrives."""
-    return asyncio.run(_download(job_ref, dest, cfg))
+    return asyncio.run(_download(job_ref, dest, cfg, report))
 
 
 async def _discard(job_ref, cfg) -> None:

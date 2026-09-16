@@ -150,18 +150,27 @@ def brief(topic: str, depth: int, kept: list[Work], admission: gate.Admission, c
     return "\n".join(lines) + "\n"
 
 
-def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None) -> list[dict[str, Any]]:
+def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None,
+           report=None) -> list[dict[str, Any]]:
     """Search, gate, rank, fetch. Returns source records for the store."""
+    say = report or (lambda _msg: None)
     budget = cfg["depth"][str(depth)]["sources"]
+    say("searching openalex and arxiv")
     found = sources.search(topic, limit=budget * 3, cfg=cfg)
     log.info("harvest %r: %d candidates", topic, len(found))
+    say(f"{len(found)} candidates")
 
+    say("ranking for relevance")
     relevant, off_topic = rank_relevance(topic, depth, found, cfg, runner)
     admission = gate.admit(relevant, depth, cfg)
     for w, why in off_topic:
         log.info("dropped %s: %s", w.title[:60], why)
     for w, why in admission.rejected:
         log.info("rejected %s: %s", w.title[:60], why)
+    say(f"{len(off_topic)} off topic, {len(admission.rejected)} rejected, "
+        f"{len(admission.accepted)} admitted ({admission.evidence or 'unknown'})")
+    for note in admission.notes:
+        say(note)
 
     records = []
     for w in admission.accepted:
@@ -170,8 +179,13 @@ def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None) -> list[d
             "url": w.url, "doi": w.doi, "title": w.title, "venue": w.venue, "year": w.year,
             "work_type": w.work_type, "tier": tier, "evidence_level": gate.TIER_LEVEL[tier],
             "oa_status": "oa" if w.is_oa else None, "retracted": int(w.retracted),
-            "local_path": fetch(w, dest, cfg),
+            "local_path": None,
         })
+        records[-1]["local_path"] = fetch(w, dest, cfg)
+        got = records[-1]["local_path"]
+        size = f"{Path(got).stat().st_size // 1024}k" if got and Path(got).exists() else \
+            ("saved" if got else "url only")
+        say(f"[{tier}] {size}  {w.title[:64]}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     (dest.parent / "brief.md").write_text(brief(topic, depth, admission.accepted, admission, cfg))
     log.info("harvest %r: %d admitted, status %s", topic, len(records), admission.status)

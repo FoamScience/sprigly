@@ -70,14 +70,15 @@ def _generated_today(conn) -> int:
 
 # --- one function per state that has work to do ----------------------------------------------
 
-def _do_picked(conn, row, cfg) -> str:
+def _do_picked(conn, row, cfg, report=None) -> str:
     _set(conn, row["id"], state="harvesting")
-    return _do_harvesting(conn, conn.execute("SELECT * FROM lesson WHERE id=?", (row["id"],)).fetchone(), cfg)
+    fresh = conn.execute("SELECT * FROM lesson WHERE id=?", (row["id"],)).fetchone()
+    return _do_harvesting(conn, fresh, cfg, report)
 
 
-def _do_harvesting(conn, row, cfg) -> str:
+def _do_harvesting(conn, row, cfg, report=None) -> str:
     dest = _lesson_dir(cfg, row["id"]) / "sources"
-    found = harvester.gather(row["topic"], row["depth"], dest, cfg)
+    found = harvester.gather(row["topic"], row["depth"], dest, cfg, report=report)
     for s in found:
         conn.execute(
             "INSERT OR IGNORE INTO source (url, doi, title, venue, year, work_type, tier,"
@@ -99,7 +100,7 @@ def _do_harvesting(conn, row, cfg) -> str:
     return "uploading"
 
 
-def _do_uploading(conn, row, cfg) -> str:
+def _do_uploading(conn, row, cfg, report=None) -> str:
     if _generated_today(conn) >= cfg["bridge"]["max_generations_per_day"]:
         return "uploading"  # quota spent; try again tomorrow, no retry counted against it
     rows = conn.execute(
@@ -112,20 +113,20 @@ def _do_uploading(conn, row, cfg) -> str:
     note = _lesson_dir(cfg, row["id"]) / "brief.md"
     job = bridge.start(row["topic"], paths, cfg, language=row["language"],
                        instructions=note.read_text() if note.exists() else None,
-                       urls=urls, depth=row["depth"])
+                       urls=urls, depth=row["depth"], report=report)
     _set(conn, row["id"], state="generating", job_ref=json.dumps(job),
          notebook_id=job.get("notebook_id"), polled_at=utcnow())
     store.log_event(conn, "generated", row["id"], json.dumps(job))
     return "generating"
 
 
-def _do_generating(conn, row, cfg) -> str:
+def _do_generating(conn, row, cfg, report=None) -> str:
     job = json.loads(row["job_ref"])
-    if not bridge.ready(job, cfg):
+    if not bridge.ready(job, cfg, report=report):
         _set(conn, row["id"], polled_at=utcnow())
         return "generating"
     actual = None
-    for a in bridge.download(job, _lesson_dir(cfg, row["id"]), cfg):
+    for a in bridge.download(job, _lesson_dir(cfg, row["id"]), cfg, report=report):
         conn.execute(
             "INSERT INTO artifact (lesson_id, kind, path, mime, bytes, duration, notebook_id)"
             " VALUES (?,?,?,?,?,?,?)",
@@ -191,8 +192,9 @@ def run(conn, cfg, on_step=None) -> Counter:
             seen.add(row["id"])
             if on_step:
                 on_step("begin", row, state)
+            report = (lambda msg: on_step("step", row, msg)) if on_step else None
             try:
-                new = handler(conn, row, cfg)
+                new = handler(conn, row, cfg, report)
                 if new != state:
                     _set(conn, row["id"], retry_count=0, last_error=None, next_attempt_at=None)
                     moved[new] += 1
@@ -220,8 +222,10 @@ def _selfcheck() -> None:
         conn = store.connect(cfg["paths"]["db"])
 
         # The real harvester searches the internet; this check stays offline.
-        def fake_gather(topic, depth, dest, cfg, runner=None):
+        def fake_gather(topic, depth, dest, cfg, runner=None, report=None):
             dest.mkdir(parents=True, exist_ok=True)
+            if report:  # the real harvester narrates each source; prove the wiring carries it
+                report(f"searching for {topic}")
             return [{"url": f"https://example.org/{topic.replace(' ', '-')}/{i}",
                      "title": f"source {i}", "tier": "A", "evidence_level": "peer-reviewed",
                      "local_path": str(dest / f"source-{i}.txt")}
@@ -233,9 +237,9 @@ def _selfcheck() -> None:
         real_bridge = (bridge.start, bridge.ready, bridge.download, bridge.discard)
         bridge.start = lambda topic, paths, cfg, **kw: {
             "notebook_id": f"nb-{abs(hash(topic)) % 1000}", "jobs": {"audio": "t1"}}
-        bridge.ready = lambda job, cfg: True
+        bridge.ready = lambda job, cfg, report=None: True
 
-        def fake_download(job, dest, cfg):
+        def fake_download(job, dest, cfg, report=None):
             dest.mkdir(parents=True, exist_ok=True)
             out = []
             for kind, name, mime, secs in (("audio", "podcast.m4a", "audio/mp4", 1380.0),
@@ -331,7 +335,8 @@ def _selfcheck() -> None:
             harvester.gather = saved
 
         # Thin flag when the gate yields under the ratio, but still enough to generate.
-        saved, harvester.gather = harvester.gather, lambda t, d, dest, c: saved(t, d, dest, c)[:3]
+        saved, harvester.gather = harvester.gather, \
+            lambda t, d, dest, c, **k: saved(t, d, dest, c)[:3]
         try:
             l8 = add("sparse topic")
             run(conn, cfg)
@@ -351,7 +356,10 @@ def _selfcheck() -> None:
         run(conn, cfg, on_step=lambda ev, row, detail: seen_steps.append((ev, row["state"], detail)))
         assert ("begin", "picked", "picked") in seen_steps
         assert ("done", "picked", "uploading") in seen_steps
-        saved2, harvester.gather = harvester.gather, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))
+        assert any(ev == "step" for ev, _, _ in seen_steps), \
+            "sub-steps are reported too, so a long phase is not a silent one"
+        saved2, harvester.gather = harvester.gather, \
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))
         try:
             seen_steps.clear()
             l11 = add("breaks")

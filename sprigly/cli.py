@@ -89,6 +89,8 @@ def tick(cfg: dict) -> None:
             topic = (row["topic"] or "")[:48]
             if event == "begin":
                 status.update(f"[cyan]{row['state']}[/cyan] [dim]{topic}[/dim]")
+            elif event == "step":
+                console.print(f"   [dim]{detail}[/dim]")
             elif event == "done" and detail != row["state"]:
                 console.print(f"[green]✓[/green] {row['id']:>3}  {row['state']} → {detail}"
                               f"  [dim]{topic}[/dim]")
