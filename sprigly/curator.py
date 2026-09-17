@@ -352,8 +352,17 @@ def _context(conn: sqlite3.Connection, cfg: dict, track_id: int | None) -> dict:
     pending = [r[0] for r in conn.execute(
         "SELECT topic FROM lesson WHERE state IN ('proposed','picked','harvesting','uploading',"
         "'generating') " + scope.replace(" AND", "AND") + " ORDER BY id DESC LIMIT 40", args)]
+    # What the learner's attention already looks like. A prospecting pass that cannot see the
+    # imbalance will happily deepen it, because the pending list reads as a topic distribution.
+    spread = conn.execute(
+        "SELECT COALESCE(domain,'unknown') AS d, count(*) AS n FROM lesson"
+        " WHERE state NOT IN ('expired','unsourced') GROUP BY d ORDER BY n DESC").fetchall()
+    total = sum(r["n"] for r in spread) or 1
+    coverage = "\n".join(f"- {r['d']}: {r['n']} ({r['n'] / total:.0%})" for r in spread)
+
     known = tags.known_tags(conn)
     return {
+        "coverage": coverage or "- nothing yet",
         "recent": "\n".join(f"- {t}" for t in recent) or "- nothing yet",
         "pending": "\n".join(f"- {t}" for t in pending) or "- nothing yet",
         "known_tags": ", ".join(known) or "none yet",
@@ -485,6 +494,17 @@ def _selfcheck() -> None:
 
         # --- known tags are fed back so the vocabulary converges instead of drifting
         assert "rbf-fd" in seen["prompt"]
+
+        # --- prospecting sees how lopsided the collection already is
+        for topic, domain in (("a", "numerics"), ("b", "numerics"), ("c", "business")):
+            conn.execute("INSERT INTO lesson (topic, domain) VALUES (?,?)", (topic, domain))
+        spread = _context(conn, cfg, None)["coverage"]
+        assert "numerics" in spread and "%" in spread, spread
+        assert spread.index("numerics") < spread.index("business"), \
+            "the dominant field is named first, so the agent cannot miss it"
+        prompt, role, _ = build_prompt(conn, cfg, None, 8)
+        assert "AWAY from the fields that already dominate" in prompt
+        assert "separate" in prompt and "Do NOT propose lessons that belong to a track" in prompt
         # --- and so are the candidates already waiting, or every run re-proposes the same ground
         assert "how RBF-FD builds a stencil".lower() in seen["prompt"].lower()
         conn.close()

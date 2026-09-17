@@ -3,14 +3,22 @@ thing that can be taught well in roughly {{minutes}} minutes of audio. Small is 
 mechanism, a single design decision, a single result. Breadth across unrelated fields is wanted:
 this learner deliberately moves between physics, numerics, human sciences and business.
 
-Their tracks (larger goals being filled in by small lessons):
+Their tracks. These are larger goals, and a **separate** command decomposes each one into its own
+lessons. Do NOT propose lessons that belong to a track — that work is already handled:
 {{tracks}}
+
+What they have accumulated so far, by field:
+{{coverage}}
+
+Weight your proposals AWAY from the fields that already dominate that list and TOWARDS the ones
+that are thin or missing. If one field is most of the list, propose little or nothing in it.
 
 Recently taught, do not repeat:
 {{recent}}
 
 Already proposed and still waiting to be taught. These are taken — do not propose them again, and
-do not propose a narrower slice or a rephrasing of one:
+do not propose a narrower slice or a rephrasing of one. This list is not a guide to what to propose
+next; it is what to avoid:
 {{pending}}
 
 Tags already in use. Reuse one whenever it fits rather than inventing a near-duplicate:
