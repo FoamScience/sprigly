@@ -80,6 +80,22 @@ def _do_picked(conn, row, cfg, report=None) -> str:
     return _do_harvesting(conn, fresh, cfg, report)
 
 
+def _min_evidence(conn, row, cfg: dict) -> str:
+    """The bar this lesson is judged against: its track's, or its domain's default.
+
+    A lesson outside any track still belongs to a field, and "scientifically proven" means
+    something different in business than in numerics, so the fallback is per domain rather than one
+    universal bar.
+    """
+    if row["track_id"]:
+        bar = conn.execute("SELECT min_evidence FROM track WHERE id=?",
+                           (row["track_id"],)).fetchone()
+        if bar:
+            return bar[0]
+    domains = cfg["sources"]["min_evidence_by_domain"]
+    return domains.get(row["domain"] or "", cfg["sources"]["default_min_evidence"])
+
+
 def _do_harvesting(conn, row, cfg, report=None) -> str:
     dest = _lesson_dir(cfg, row["id"]) / "sources"
     # A lesson that already has sources is being freshened, not harvested from scratch: keep them
@@ -91,7 +107,8 @@ def _do_harvesting(conn, row, cfg, report=None) -> str:
     if known and report:
         report(f"freshening: {len(known)} sources kept, looking for {want} more")
     found = harvester.gather(row["topic"], row["depth"], dest, cfg, report=report,
-                             exclude=known, want=want)
+                             exclude=known, want=want,
+                             min_evidence=_min_evidence(conn, row, cfg))
     for s in found:
         conn.execute(
             "INSERT OR IGNORE INTO source (url, doi, title, venue, year, work_type, tier,"
@@ -296,8 +313,11 @@ def _selfcheck() -> None:
         conn = store.connect(cfg["paths"]["db"])
 
         # The real harvester searches the internet; this check stays offline.
+        seen_bars: list[str] = []
+
         def fake_gather(topic, depth, dest, cfg, runner=None, report=None,
-                        exclude=None, want=None):
+                        exclude=None, want=None, min_evidence=None):
+            seen_bars.append(min_evidence)
             dest.mkdir(parents=True, exist_ok=True)
             if report:  # the real harvester narrates each source; prove the wiring carries it
                 report(f"searching for {topic}")
@@ -340,6 +360,19 @@ def _selfcheck() -> None:
 
         def state_of(lid):
             return conn.execute("SELECT state FROM lesson WHERE id=?", (lid,)).fetchone()[0]
+
+        # The track's bar, and the domain default behind it, must reach the harvest — that is the
+        # only place evidence level is decided, and it used to be judged against the global default.
+        tid = conn.execute("INSERT INTO track (goal, min_evidence) VALUES ('markets','preprint')"
+                           ).lastrowid
+        tracked = add("bond pricing", track_id=tid, domain="business")
+        run(conn, cfg)
+        assert seen_bars[-1] == "preprint", f"the track's bar, got {seen_bars[-1]!r}"
+        untracked = add("cash conversion cycle", domain="business")
+        run(conn, cfg)
+        assert seen_bars[-1] == "institutional", f"the domain default, got {seen_bars[-1]!r}"
+        assert state_of(tracked) == "generating" and state_of(untracked) == "uploading"
+        conn.execute("DELETE FROM lesson WHERE id IN (?,?)", (tracked, untracked))
 
         # Happy path: picked -> uploading -> generating -> ready, one step per pass.
         lid = add()

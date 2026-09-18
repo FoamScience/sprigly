@@ -182,12 +182,17 @@ def brief(topic: str, depth: int, kept: list[Work], admission: gate.Admission, c
 
 
 def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None, report=None,
-           exclude: set[str] | None = None, want: int | None = None) -> list[dict[str, Any]]:
+           exclude: set[str] | None = None, want: int | None = None,
+           min_evidence: str | None = None) -> list[dict[str, Any]]:
     """Search, gate, rank, fetch. Returns source records for the store.
 
     `exclude` and `want` are what freshening needs: skip what the lesson already has, and stop
     after a few genuinely new ones. The originals stay the baseline — a refresher that replaced its
     sources would be a different lesson wearing the same name.
+
+    `min_evidence` is the track's tolerance. Without it every harvest was judged against the one
+    global default, which made `track.min_evidence` decorative at the only point where it decides
+    anything.
     """
     say = report or (lambda _msg: None)
     exclude = {u.lower() for u in (exclude or set())}
@@ -204,7 +209,7 @@ def gather(topic: str, depth: int, dest: Path, cfg: dict, runner=None, report=No
         found.sort(key=lambda w: -(w.year or 0))
 
     relevant, off_topic = rank_relevance(topic, depth, found, cfg, runner, report)
-    admission = gate.admit(relevant, depth, cfg)
+    admission = gate.admit(relevant, depth, cfg, min_evidence)
     for w, why in off_topic:
         log.info("dropped %s: %s", w.title[:60], why)
     for w, why in admission.rejected:

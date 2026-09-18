@@ -309,20 +309,32 @@ statistics rather than journal articles.
 
 So the bar is per-track, not global. Every source carries a tier; every lesson derives an
 `evidence_level` — `peer-reviewed`, `preprint`, `institutional`, `practitioner` or `manual` — from
-its **weakest** admitted source, since what a lesson rests on is its floor and not its best
-citation. One preprint among nine journal articles makes the lesson a preprint lesson. Shown in its
-notes and in `sprigly sources <id>`. `track.min_evidence` sets the tolerance — defaulting to
-`peer-reviewed` for STEM tracks and `institutional` for business ones. **The system never silently
-downgrades**; it flags or refuses.
+the level **half its admitted sources meet or beat**, with an even split labelled by the weaker
+half. The first rule here was the weakest source, on the argument that a lesson rests on its floor;
+measurement retired it (tasks-8wk.10). One preprint among fourteen journal articles relabelled a
+numerics lesson a preprint lesson and marked it thin, which is not what "admitted but never the
+only source" was meant to say. A lesson carried by preprints still reads preprint. Shown in its
+notes and in `sprigly sources <id>`. `track.min_evidence` sets the tolerance and reaches the
+harvest that decides the label; a lesson outside any track falls back to
+`sources.min_evidence_by_domain` — `institutional` for business — and then to the global default.
+**The system never silently downgrades**; it flags or refuses.
 
 Per-domain source classes: human sciences prefer meta-analyses and systematic reviews and flag
 single-study claims; business admits working papers (NBER, SSRN with institutional affiliation),
 regulator filings, standards, national statistics and textbooks, and excludes consultancy
 whitepapers and trade magazines as primary sources.
 
-Both the tier thresholds and these class lists are settled by **measurement, not argument**: run
-the gate over three topics — one numerics, one human science, one business — at depth 3 and 5, and
-read the yield.
+Business classes are Tier B hosts: NBER, SSRN, RePEc, BIS, IMF, OECD, the World Bank, the ECB, ISO
+and the national statistics and standards bodies, alongside the university and government suffixes.
+Consultancy whitepapers and trade magazines are left out and fail the venue test anyway. Human
+sciences need no separate mechanism: OpenAlex types meta-analyses and systematic reviews as
+`review`, which the ranking already puts first while the lesson is broad.
+
+Both the tier thresholds and these class lists were settled by **measurement, not argument**
+(tasks-8wk.10, 2026-09-18): three topics — numerics, human sciences, business — at depth 3 and 5.
+The gate admitted 79-90% and filled the budget every time, so `min_tier_a` moved from 1 to 3 and
+nothing else moved. The binding constraint is reachability, not credibility: 58% of best-ranked
+open-access pdf links actually serve a file, the rest being publisher 403s.
 
 ### 7. NotebookLM Bridge — thin wrapper over `notebooklm-py`
 
