@@ -5,7 +5,7 @@ Four layers, each from a different literature; docs/picker-literature.md carries
   1. eligibility  - a readiness gate, after Knowledge Space Theory's outer fringe
   2. score        - weighted signals, normalised within the candidate pool
   3. offer        - greedy DPP selection, calibrated to a target domain mix, with a review lane
-  4. fitting      - conditional logit over the recorded choice sets (not here; see .18.4)
+  4. fitting      - conditional logit over the recorded choice sets (not here; see fit.py)
 
 Nothing in this module touches the database, and the score stays linear in its signals. Layer 4
 depends on both properties.

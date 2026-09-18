@@ -204,7 +204,12 @@ table accepting comma-separated numbers, rather than failing inside the subproce
 top-1-of-k choice; its exact likelihood is the conditional logit (McFadden), equivalently
 Plackett-Luce top-1. Multi-pick offerings give a choice set several positives and need an explicit
 decision — independent draws, or an unordered top-m likelihood — since the naive expansion
-double-counts the shared negatives. No invented ground truth, skips used as real negatives. Because it is linear in
+double-counts the shared negatives. `sprigly fit` (`sprigly/fit.py`) takes the second: the exact
+matched-set conditional likelihood, via statsmodels `ConditionalLogit`, which conditions on *which*
+m of the k were taken without an order among them and so uses each shared negative once. It refuses
+to fit below 30 usable choice sets; until then the hand-set weights stand. Sets where everything
+offered was taken drop out — they carry no comparison. No invented ground truth, skips used as real
+negatives. Because it is linear in
 the features, the hand-weighted scorer is not a placeholder — it is the model that gets fitted.
 Keeping the score linear, and scoring pure, are the two properties every later change must preserve.
 
