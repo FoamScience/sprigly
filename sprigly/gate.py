@@ -8,6 +8,7 @@ passed. Everything below is a rule you can point at afterwards and argue with.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from statistics import median_low
 from urllib.parse import urlparse
 
 from .sources import READABLE_TYPES, Work
@@ -147,7 +148,14 @@ def admit(works: list[Work], depth: int, cfg: dict, min_evidence: str | None = N
         out.notes.append("no review or survey among the sources at this depth")
 
     if kept:
-        out.evidence = min((TIER_LEVEL[tiers[w.key]] for w in kept), key=LEVEL_ORDER.index)
+        # The level half the sources meet or beat, not the level of the single weakest one. The
+        # floor rule read well and measured badly: one preprint among fourteen journal articles
+        # relabelled the whole lesson a preprint lesson and marked it thin (tasks-8wk.10, numerics
+        # at depth 5). The median keeps the intent that a preprint is admitted but never carries a
+        # lesson alone — a set that is mostly preprints still reads preprint — and median_low
+        # breaks an even split downward, so a half-and-half lesson is labelled by its weaker half.
+        levels = sorted((LEVEL_ORDER.index(TIER_LEVEL[tiers[w.key]]) for w in kept))
+        out.evidence = LEVEL_ORDER[median_low(levels)]
 
     if len(kept) < s["min_sources"]:
         out.status = "unsourced"
@@ -194,6 +202,11 @@ def _selfcheck() -> None:
     # --- tiers
     assert classify(w("a", **journal), cfg).tier == "A"
     assert classify(w("b", **pre), cfg).tier == "A-"
+    # Tier A is a journal OR a conference. OpenAlex types some proceedings 'conference-paper', and
+    # leaving that out of the readable types rejected them as non-scholarship before the venue was
+    # ever looked at (tasks-8wk.10).
+    assert classify(w("c", venue="IPCC", venue_type="conference", work_type="conference-paper",
+                      is_oa=True), cfg).tier == "A"
     assert classify(Work("n", "https://ocw.mit.edu/x", work_type="report", is_oa=True), cfg).tier == "B"
     assert classify(Work("v", "https://youtube.com/@veritasium/video/1"), cfg).tier == "C", \
         "an allowlisted channel is admitted without needing open-access metadata"
@@ -215,11 +228,15 @@ def _selfcheck() -> None:
     assert n_pre <= int(budget * cfg["sources"]["max_preprint_ratio"]), f"{n_pre} preprints admitted"
     assert any(x.work_type == "review" for x in got.accepted), "the review survives the cull"
 
-    # --- evidence is the floor, not the ceiling
+    # --- evidence is what half the sources meet, not the single weakest one
     assert admit([w(f"a{i}", **journal) for i in range(budget)], depth, cfg).evidence == "peer-reviewed"
     mixed = admit([w("a", **journal), w("b", **pre)] + [w(f"c{i}", **journal) for i in range(4)],
                   depth, cfg)
-    assert mixed.evidence == "preprint", "one preprint sets the floor for the whole lesson"
+    assert mixed.evidence == "peer-reviewed", "one preprint does not relabel a peer-reviewed lesson"
+    mostly_pre = admit([w("a", **journal)] + [w(f"p{i}", **pre) for i in range(4)], depth, cfg)
+    assert mostly_pre.evidence == "preprint", "a lesson carried by preprints reads preprint"
+    even = admit([w("a", **journal), w("b", **journal), w("p1", **pre), w("p2", **pre)], depth, cfg)
+    assert even.evidence == "preprint", "an even split is labelled by its weaker half"
 
     # --- composition notes fire without blocking
     only_pre = admit([w(f"p{i}", **pre) for i in range(3)], depth, cfg)
@@ -238,11 +255,15 @@ def _selfcheck() -> None:
                                                 for _, r in over.rejected)
 
     # --- the track's bar is reported, never silently met
-    strict = admit([w("a", **journal), w("b", **pre)] + [w(f"c{i}", **journal) for i in range(4)],
-                   depth, cfg, min_evidence="peer-reviewed")
+    # Two journal articles and four preprints: past thin_ratio, and the preprint quota allows no
+    # higher share than this, so it is the weakest a full-size lesson can legitimately be.
+    carried_by_preprints = [w("a", **journal), w("a2", **journal)] + \
+        [w(f"p{i}", **pre) for i in range(4)]
+    strict = admit(carried_by_preprints, depth, cfg, min_evidence="peer-reviewed")
+    assert strict.evidence == "preprint"
     assert strict.status == "thin" and any("below the track" in n for n in strict.notes)
-    assert admit([w("a", **journal), w("b", **pre)] + [w(f"c{i}", **journal) for i in range(4)],
-                 depth, cfg, min_evidence="institutional").status == "ok"
+    assert admit(carried_by_preprints, depth, cfg, min_evidence="institutional").status == "ok", \
+        "a business track that tolerates preprints is not told its lesson is thin"
 
     # --- surveys lead while the lesson is broad, primary work once it is not
     pair = [w("primary", **journal), w("survey", **review)]

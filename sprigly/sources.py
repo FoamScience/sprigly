@@ -14,7 +14,8 @@ log = logging.getLogger(__name__)
 
 # OpenAlex work types that are a piece of readable scholarship. Everything else — datasets,
 # editorials, retraction notices, peer-review reports — is not a lesson source.
-READABLE_TYPES = {"article", "review", "book-chapter", "book", "preprint", "report", "dissertation"}
+READABLE_TYPES = {"article", "review", "book-chapter", "book", "preprint", "report", "dissertation",
+                  "conference-paper"}
 
 
 @dataclass

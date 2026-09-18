@@ -87,18 +87,40 @@ DEFAULTS: dict[str, Any] = {
         # because sending your address to a third party should be a deliberate choice.
         "mailto": "",
         "open_access_only": True,
-        "allowed_types": ["article", "review", "book-chapter", "preprint", "report", "dissertation"],
-        "institutional_suffixes": [".edu", ".gov", ".ac.uk", ".ac.jp"],
+        "allowed_types": ["article", "review", "conference-paper", "book-chapter", "preprint",
+                          "report", "dissertation"],
+        # Tier B. University and government suffixes, then the bodies that publish the primary
+        # material in business and policy: working papers, regulator filings, standards and
+        # national statistics. Consultancy whitepapers and trade magazines are deliberately absent
+        # — they have no recognised venue either, so they stay out as primary sources.
+        "institutional_suffixes": [".edu", ".gov", ".ac.uk", ".ac.jp", ".int", "europa.eu",
+                                   "nber.org", "ssrn.com", "repec.org", "bis.org", "imf.org",
+                                   "oecd.org", "worldbank.org", "ecb.europa.eu", "iso.org",
+                                   "nist.gov", "who.int"],
         # Tier C is per-channel, never "YouTube" as a whole.
         "channel_allowlist": [],
-        # Composition per lesson, the real quality lever. Thresholds are provisional until the
-        # yield spike measures them.
-        "min_tier_a": 1,
+        # Composition per lesson, the real quality lever. Measured over numerics, human sciences
+        # and business at depth 3 and 5 (tasks-8wk.10): the gate admits 79-90% of what the search
+        # returns and fills the budget every time, so none of these bind on a healthy field. They
+        # are floors for a sparse one. Peer-reviewed sources per lesson ran 10-15, so 3 is well
+        # under the observed minimum and still refuses a lesson built out of preprints alone.
+        "min_tier_a": 3,
+        # Never approached: 0% at depth 3 and at most 7% at depth 5, because tier A sorts ahead of
+        # preprints and the budget fills first. Left at its original value rather than tuned — six
+        # observations are not grounds for moving a guard that never fired.
         "max_preprint_ratio": 0.4,
+        # Satisfiable, contrary to the earlier reading. Reviews exist for every field measured
+        # (2 for the numerics query, 80 business, 2316 human sciences) and one was ranked into the
+        # accepted set at depth 3 in all three. Thin in numerics, so the note can still fire there.
         "require_review_at_depth_upto": 3,
         "thin_ratio": 0.6,
         "min_sources": 2,
         "default_min_evidence": "peer-reviewed",
+        # A lesson with no track is judged by its domain. "Scientifically proven" maps onto physics
+        # and numerics and poorly onto business, where the good primary material is working papers,
+        # regulator filings and statistics rather than journal articles. A track's own
+        # min_evidence always wins over this.
+        "min_evidence_by_domain": {"business": "institutional"},
         # No adapter may stall a harvest indefinitely.
         "http_timeout_seconds": 30.0,
         # How many candidates the relevance agent is asked to judge in one prompt. The gate bounds
