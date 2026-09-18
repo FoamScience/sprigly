@@ -263,6 +263,49 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
     conn.close()
 
 
+@main.command("fit")
+@click.option("--min-sets", type=int, default=None,
+              help="Refuse to fit below this many usable choice sets.")
+@click.pass_obj
+def fit_cmd(cfg: dict, min_sets: int | None) -> None:
+    """Fit the scoring weights to the offerings you actually picked from."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from . import fit as fitting
+    from . import picker, store
+
+    console = Console()
+    conn = store.connect(cfg["paths"]["db"])
+    sets = fitting.choice_sets(conn)
+    conn.close()
+    try:
+        f = fitting.fit(sets, fitting.MIN_CHOICE_SETS if min_sets is None else min_sets)
+    except ValueError as exc:
+        console.print(f"[dim]{exc}[/dim]")
+        return
+
+    w = cfg["scoring"]
+    total_w = sum(w[k] for k in picker.SIGNALS) or 1.0
+    table = Table("signal", "weight now", "coefficient", "std err", "p",
+                  title=f"conditional logit · {f.n_sets} choice sets,"
+                        f" {f.n_picks} picks out of {f.n_rows} offers")
+    for k in picker.SIGNALS:
+        table.add_row(k.replace("_", "-"), f"{w[k] / total_w:.2f}", f"{f.coef[k]:+.2f}",
+                      f"{f.stderr[k]:.2f}", f"{f.pvalue[k]:.3f}")
+    console.print(table)
+
+    fitted = f.weights()
+    if fitted is None:
+        console.print("[yellow]![/yellow] a coefficient came out negative: the scorer normalises by"
+                      " the weight total, so there is no [scoring] block that reproduces this fit")
+        return
+    console.print("\n[dim]paste into the config to adopt the fit:[/dim]")
+    click.echo("[scoring]")
+    for k in picker.SIGNALS:
+        click.echo(f"{k} = {fitted[k]:.3f}")
+
+
 @main.command()
 @click.option("--track", type=int, help="Decompose this track instead of prospecting.")
 @click.option("-n", type=int, help="How many lessons to ask for.")
@@ -845,7 +888,7 @@ def _selfcheck() -> None:
     runner = CliRunner()
     commands = sorted(main.commands)
     assert {"config", "curate", "next", "tick", "status", "quiz", "review", "ask", "play",
-            "done", "redo", "deeper", "focus", "notebooks"} <= set(commands), commands
+            "done", "redo", "deeper", "focus", "notebooks", "fit"} <= set(commands), commands
 
     for name in commands:
         result = runner.invoke(main, [name, "--help"])
@@ -853,7 +896,7 @@ def _selfcheck() -> None:
 
     with tempfile.TemporaryDirectory() as td:
         env = {"XDG_DATA_HOME": td, "XDG_CONFIG_HOME": td}
-        for argv in (["config"], ["status"], ["focus"], ["next"], ["review"]):
+        for argv in (["config"], ["status"], ["focus"], ["next"], ["review"], ["fit"]):
             result = runner.invoke(main, argv, env=env, input="\n")
             assert result.exit_code == 0, f"{argv}: {result.exception or result.output[-300:]}"
         # The config is printed as TOML so it can be pasted straight back into the file.
@@ -869,6 +912,33 @@ def _selfcheck() -> None:
         # An unknown reference is a message, not a traceback.
         result = runner.invoke(main, ["status", "nothing-like-this"], env=env)
         assert result.exit_code != 0 and "no lesson" in result.output, result.output
+
+        # What `next` writes must be what the fit reads back: the choice sets live only in these
+        # payloads, and a renamed key would lose the training data silently.
+        import os
+
+        from . import fit as fitting
+        from . import store
+
+        os.environ.update(env)
+        try:
+            db = config.load()["paths"]["db"]
+            conn = store.connect(db)
+            for i in range(3):
+                conn.execute("INSERT INTO lesson (topic, domain, state, est_minutes)"
+                             " VALUES (?, 'numerics', 'proposed', 20)", (f"candidate {i}",))
+            conn.commit()
+            conn.close()
+            result = runner.invoke(main, ["next"], env=env, input="1 2\n")
+            assert result.exit_code == 0, result.exception or result.output[-300:]
+            conn = store.connect(db)
+            sets = fitting.choice_sets(conn)
+            conn.close()
+            assert len(sets) == 1, f"one offering, one choice set: {sets}"
+            assert sum(1 for *_, picked in sets[0].rows if picked) == 2, "both picks recovered"
+        finally:
+            for k in env:
+                os.environ.pop(k, None)
 
     print("cli selfcheck ok")
 
