@@ -96,19 +96,25 @@ def config_default(ctx: typer.Context) -> None:
 def show_config(ctx: typer.Context) -> None:
     """Print the resolved configuration, in the format the config file itself uses."""
     import tomli_w
+    from rich.console import Console
+    from rich.syntax import Syntax
 
     cfg = ctx.obj
 
     path = config.config_path()
-    typer.echo(f"# {path}  ({'in use' if path.is_file() else 'not present, showing defaults'})")
-    typer.echo(f"# copy any section below into that file to change it\n")
     # Paths are resolved absolute at load time and are derived, not settings, so they are shown
     # separately as comments rather than offered as something to paste back.
     settings = {k: v for k, v in cfg.items() if k != "paths"}
-    typer.echo(tomli_w.dumps(settings).rstrip())
-    typer.echo("\n# resolved paths")
-    for name, value in sorted(cfg["paths"].items()):
-        typer.echo(f"#   {name:<8} {value}")
+    lines = [f"# {path}  ({'in use' if path.is_file() else 'not present, showing defaults'})",
+             "# copy any section below into that file to change it", "",
+             tomli_w.dumps(settings).rstrip(), "", "# resolved paths"]
+    lines += [f"#   {name:<8} {value}" for name, value in sorted(cfg["paths"].items())]
+
+    # ANSI theme rather than one of rich's own: the colours then come from the terminal's palette,
+    # so this stays readable on a light background as well as a dark one. Redirected output is
+    # plain text either way, and must stay parseable — it is meant to be pasted back.
+    Console(soft_wrap=True).print(
+        Syntax("\n".join(lines), "toml", theme="ansi_dark", background_color="default"))
 
 
 @config_app.command("edit")
@@ -987,6 +993,8 @@ def _selfcheck() -> None:
         assert parsed["bridge"]["artifacts"] == ["audio", "video", "quiz"]
         assert parsed["scoring"]["prereq"] == 0.25
         assert "paths" not in parsed, "resolved paths are shown as comments, not as settings"
+        assert "\x1b[" not in printed, \
+            "highlighting must not survive redirection — the output is meant to be pasted back"
         assert runner.invoke(main, ["config", "show"], env=env).output == printed, \
             "bare `config` and `config show` print the same thing"
 
