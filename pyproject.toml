@@ -10,11 +10,11 @@ dependencies = [
     "habanero",
     "arxiv",
     "trafilatura",
-    "click",
     "rich",
     "iterfzf>=1.9.0.67.0",
     "tomli-w>=1.2.0",
     "statsmodels>=0.15.0",
+    "typer>=0.27.2",
 ]
 
 [project.scripts]

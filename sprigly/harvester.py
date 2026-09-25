@@ -116,13 +116,55 @@ def _save_text(w: Work, dest: Path, text: str, cfg: dict) -> str | None:
     return str(path)
 
 
+# Repositories content-negotiate, and several answer the default httpx user agent with their
+# landing page or a 403 while serving the same URL as a pdf to a client that says what it wants.
+# Measured over 5 blocked copies: 1 of 5 without these, 4 of 5 with them. This identifies sprigly
+# honestly rather than impersonating a browser — a browser string was not better (one repository
+# was worse), and anything behind a real javascript challenge stays unreachable either way.
+PDF_HEADERS = {
+    "User-Agent": "sprigly/0.1 (+https://github.com/FoamScience/sprigly)",
+    "Accept": "application/pdf,*/*;q=0.8",
+}
+
+
+def _download_pdf(url: str, path: Path, timeout: float, limit: int) -> bool:
+    """One attempt at one copy. Leaves no file behind unless it really is a PDF."""
+    import httpx
+
+    try:
+        with httpx.stream("GET", url, timeout=timeout, follow_redirects=True,
+                          headers=PDF_HEADERS) as r:
+            r.raise_for_status()
+            written, first, ok = 0, True, True
+            with path.open("wb") as fh:
+                for chunk in r.iter_bytes():
+                    if first:
+                        first = False
+                        if not _is_pdf(chunk):
+                            why = ("an anti-bot challenge" if _challenge(chunk)
+                                   else r.headers.get("content-type", "unknown content"))
+                            log.warning("%s answered with %s, not a pdf", url, why)
+                            ok = False
+                            break
+                    written += len(chunk)
+                    if written > limit:
+                        log.warning("%s exceeds max_bytes, abandoning", url)
+                        ok = False
+                        break
+                    fh.write(chunk)
+        if ok and written:
+            return True
+    except Exception as err:
+        log.warning("pdf fetch failed for %s: %s", url, err)
+    path.unlink(missing_ok=True)
+    return False
+
+
 def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
     """Pull the source down so the bridge uploads a file, not a URL.
 
     Files beat URLs twice over: the upload is more reliable, and the lesson survives link rot.
     """
-    import httpx
-
     limit = cfg["sources"]["max_bytes"]
     timeout = cfg["sources"]["fetch_timeout_seconds"]
     dest.mkdir(parents=True, exist_ok=True)
@@ -130,32 +172,17 @@ def fetch(w: Work, dest: Path, cfg: dict) -> str | None:
 
     path = dest / f"{stem}.pdf"
     for candidate in (w.pdf_urls or ([w.pdf_url] if w.pdf_url else [])):
-        try:
-            with httpx.stream("GET", candidate, timeout=timeout, follow_redirects=True) as r:
-                r.raise_for_status()
-                written, first, ok = 0, True, True
-                with path.open("wb") as fh:
-                    for chunk in r.iter_bytes():
-                        if first:
-                            first = False
-                            if not _is_pdf(chunk):
-                                why = ("an anti-bot challenge" if _challenge(chunk)
-                                       else r.headers.get("content-type", "unknown content"))
-                                log.warning("%s answered with %s, not a pdf", candidate, why)
-                                ok = False
-                                break
-                        written += len(chunk)
-                        if written > limit:
-                            log.warning("%s exceeds max_bytes, abandoning", candidate)
-                            ok = False
-                            break
-                        fh.write(chunk)
-            if ok and written:
+        if _download_pdf(candidate, path, timeout, limit):
+            return str(path)
+
+    # Every copy OpenAlex knew about failed. Other indexes keep their own location sets, and a
+    # repository copy one of them lists is usually the one that serves the file without a
+    # challenge. Asked only here, so a source that downloads first try costs no extra requests.
+    if cfg["sources"]["oa_fallbacks"]:
+        for candidate in sources.oa_fallbacks(w, cfg["sources"]["mailto"] or None, timeout):
+            if _download_pdf(candidate, path, timeout, limit):
+                log.info("recovered %s from %s after its own links failed", w.title[:60], candidate)
                 return str(path)
-            path.unlink(missing_ok=True)
-        except Exception as err:
-            log.warning("pdf fetch failed for %s: %s", candidate, err)
-            path.unlink(missing_ok=True)
 
     try:
         import trafilatura
