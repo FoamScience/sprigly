@@ -132,6 +132,9 @@ DEFAULTS: dict[str, Any] = {
         # Below this many characters an extraction is a landing page, not a paper.
         "min_text_bytes": 6_000,
         "fetch_timeout_seconds": 30,
+        # When every pdf link OpenAlex carried has failed, ask Unpaywall and Semantic Scholar
+        # whether they know a copy it missed. Turn this off to keep your dois off those services.
+        "oa_fallbacks": True,
     },
     "bridge": {
         # Which artifacts each lesson gets. The video overview is narrated slides, so it covers

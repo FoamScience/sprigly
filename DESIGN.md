@@ -345,7 +345,7 @@ notebooklm auth refresh --quiet                   # from the same timer as tick
 
 Master-token auth mints fresh cookies on demand with no browser per session, which is what makes
 unattended ticks viable. The library is async and the rest of Sprigly is not, so there is one
-`asyncio.run()` per call at this boundary and the click app stays plain synchronous code.
+`asyncio.run()` per call at this boundary and the typer app stays plain synchronous code.
 
 **Sources go up as files *or* URLs** — `sources.add_url` exists, so anything the harvester could not
 download is still uploaded by link, and Tier C video needs no separate downloader. `yt-dlp` is
@@ -516,7 +516,7 @@ One TOML file. Everything below is a knob, and none of it is a code change:
 | Spaced repetition | `fsrs` |
 | Literature metadata | `habanero` (Crossref), `arxiv`; OpenAlex is called directly over `httpx`, since `pyalex` offers no timeout |
 | URL to clean text | `trafilatura` |
-| CLI / output / HTTP | `click`, `rich`, `httpx` — already transitive deps of `notebooklm-py` |
+| CLI / output / HTTP | `typer`, `rich`, `httpx` — `rich` and `httpx` are already transitive deps of `notebooklm-py` |
 | Fuzzy picking | `iterfzf` — ships the `fzf` binary in the wheel, so nothing to install separately |
 | Store | stdlib `sqlite3` |
 | Scheduling, locking, backup, logging, paths | stdlib and systemd |

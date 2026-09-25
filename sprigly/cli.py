@@ -7,13 +7,23 @@ import logging
 import sys
 import time
 import uuid
+from enum import Enum
 from pathlib import Path
 
-import click
+import typer
 
 from . import config
 
 log = logging.getLogger(__name__)
+
+
+def _fail(message: str) -> typer.Exit:
+    """A user-facing failure: one line on stderr and a non-zero exit, not a traceback.
+
+    Returned rather than raised so the call site keeps `raise` and reads as the exit it is.
+    """
+    typer.secho(f"Error: {message}", fg=typer.colors.RED, err=True)
+    return typer.Exit(1)
 
 
 class _ConsoleWarnings(logging.Handler):
@@ -48,49 +58,96 @@ def _setup_logging(path: Path) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ")
 
 
-@click.group()
-@click.option("--config", "config_file", type=click.Path(path_type=Path),
-              help="Config TOML to use instead of the XDG location.")
-@click.pass_context
-def main(ctx: click.Context, config_file) -> None:
+main = typer.Typer(no_args_is_help=True, add_completion=False)
+
+
+@main.callback()
+def _load(ctx: typer.Context,
+          config_file: Path = typer.Option(None, "--config",
+                                           help="Config TOML to use instead of the XDG location.")
+          ) -> None:
     """Learn one thing at a time."""
-    ctx.obj = config.load(path=config_file)
+    import tomllib
+
+    try:
+        ctx.obj = config.load(path=config_file)
+    except tomllib.TOMLDecodeError as err:
+        # Falling back to the defaults rather than exiting, so `sprigly config edit` — the one
+        # command that can repair this — is still reachable. Every other command says so first.
+        typer.secho(f"! {config_file or config.config_path()}: {err}"
+                    f" — running on defaults; fix it with `sprigly config edit`",
+                    fg=typer.colors.YELLOW, err=True)
+        ctx.obj = config.load(path=Path("/nonexistent.toml"))
     _setup_logging(ctx.obj["paths"]["log"])
 
 
-@main.command("config")
-@click.pass_obj
-def show_config(cfg: dict) -> None:
+config_app = typer.Typer(no_args_is_help=False, help="Show or edit the configuration file.")
+main.add_typer(config_app, name="config", invoke_without_command=True)
+
+
+@config_app.callback(invoke_without_command=True)
+def config_default(ctx: typer.Context) -> None:
+    """Show or edit the configuration file. With no subcommand, show it."""
+    if ctx.invoked_subcommand is None:
+        show_config(ctx)
+
+
+@config_app.command("show")
+def show_config(ctx: typer.Context) -> None:
     """Print the resolved configuration, in the format the config file itself uses."""
     import tomli_w
 
+    cfg = ctx.obj
+
     path = config.config_path()
-    click.echo(f"# {path}  ({'in use' if path.is_file() else 'not present, showing defaults'})")
-    click.echo(f"# copy any section below into that file to change it\n")
+    typer.echo(f"# {path}  ({'in use' if path.is_file() else 'not present, showing defaults'})")
+    typer.echo(f"# copy any section below into that file to change it\n")
     # Paths are resolved absolute at load time and are derived, not settings, so they are shown
     # separately as comments rather than offered as something to paste back.
     settings = {k: v for k, v in cfg.items() if k != "paths"}
-    click.echo(tomli_w.dumps(settings).rstrip())
-    click.echo("\n# resolved paths")
+    typer.echo(tomli_w.dumps(settings).rstrip())
+    typer.echo("\n# resolved paths")
     for name, value in sorted(cfg["paths"].items()):
-        click.echo(f"#   {name:<8} {value}")
+        typer.echo(f"#   {name:<8} {value}")
+
+
+@config_app.command("edit")
+def edit_config() -> None:
+    """Open the configuration file in $EDITOR, and refuse to leave it unparseable."""
+    import os
+    import subprocess
+    import tomllib
+
+    path = config.config_path()
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# sprigly configuration — `sprigly config show` prints every setting"
+                        " with its current value.\n")
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    subprocess.call([editor, str(path)])
+    try:
+        tomllib.loads(path.read_text())
+    except tomllib.TOMLDecodeError as err:
+        raise _fail(f"{path} is not valid TOML: {err}")
+    typer.echo(f"{path} saved")
 
 
 @main.command()
-@click.option("--lesson", "lesson_ref", metavar="LESSON",
-              help="Advance only this lesson, ignoring its backoff window.")
-@click.pass_obj
-def tick(cfg: dict, lesson_ref: str | None) -> None:
+def tick(ctx: typer.Context,
+         lesson_ref: str = typer.Option(None, "--lesson", metavar="LESSON",
+                                        help="Advance only this lesson, ignoring its backoff"
+                                             " window.")) -> None:
     """Advance every lesson one step. Safe to run from a timer."""
     from . import store, tick as ticker
 
     from rich.console import Console
 
+    cfg = ctx.obj
     console = Console()
     _echo_warnings(console)
     with ticker.lock(cfg["paths"]["data"] / "tick.lock") as held:
         if not held:
-            click.echo("another tick is running")
+            typer.echo("another tick is running")
             return
         conn = store.connect(cfg["paths"]["db"])
         lesson = _ref(conn, lesson_ref) if lesson_ref else None
@@ -131,15 +188,15 @@ def tick(cfg: dict, lesson_ref: str | None) -> None:
 
 
 @main.command()
-@click.argument("lesson_ref", metavar="LESSON", required=False)
-@click.pass_obj
-def status(cfg: dict, lesson_ref: str | None) -> None:
+def status(ctx: typer.Context,
+           lesson_ref: str = typer.Argument(None, metavar="LESSON")) -> None:
     """Pipeline state, parked failures and review load. With an id, inspect one lesson."""
     from rich.console import Console
     from rich.table import Table
 
     from . import store
 
+    cfg = ctx.obj
     conn = store.connect(cfg["paths"]["db"])
     console = Console()
 
@@ -194,7 +251,7 @@ def _choose(menu: list, cfg: dict) -> list[int]:
         table.add_row(str(i), o.kind, o.candidate.slug or o.candidate.topic, o.candidate.domain,
                       str(o.candidate.est_minutes), f"{o.score:.2f}", _why(o, cfg))
     Console().print(table)
-    raw = click.prompt("pick", default="", show_default=False,
+    raw = typer.prompt("pick", default="", show_default=False,
                        prompt_suffix=" (numbers, comma-separated; empty to skip all): ")
     out = []
     for part in str(raw).replace(",", " ").split():
@@ -213,18 +270,19 @@ def _why(offer, cfg: dict) -> str:
 
 
 @main.command()
-@click.option("--budget", type=int, help="Minutes available today.")
-@click.option("-k", "k", type=int, help="How many to offer (default from config).")
-@click.option("--all", "show_all", is_flag=True,
-              help="Offer every eligible candidate instead of a selected menu.")
-@click.pass_obj
-def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
+def next(ctx: typer.Context,
+         budget: int = typer.Option(None, "--budget", help="Minutes available today."),
+         k: int = typer.Option(None, "-k", help="How many to offer (default from config)."),
+         show_all: bool = typer.Option(False, "--all",
+                                       help="Offer every eligible candidate instead of a selected"
+                                            " menu.")) -> None:
     """Offer the next lessons and record which one you take."""
     from rich.console import Console
     from rich.table import Table
 
     from . import picker, snapshot, store
 
+    cfg = ctx.obj
     conn = store.connect(cfg["paths"]["db"])
     snap = snapshot.load(conn, cfg)
     if budget:
@@ -235,7 +293,7 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
     menu = picker.offer_all(pool, due, snap, cfg) if show_all \
         else picker.offer(pool, due, snap, cfg)
     if not menu:
-        click.echo("nothing to offer — run `sprigly curate` to propose lessons,"
+        typer.echo("nothing to offer — run `sprigly curate` to propose lessons,"
                    " or `sprigly status` to see what is in flight")
         conn.close()
         return
@@ -256,18 +314,18 @@ def next(cfg: dict, budget: int | None, k: int | None, show_all: bool) -> None:
             conn.execute("UPDATE lesson SET state='picked', score=?, updated_at=? WHERE id=?",
                          (taken.score, store.utcnow(), taken.candidate.id))
             name = taken.candidate.slug or taken.candidate.id
-            click.echo(f"picked {name}: {taken.candidate.topic}"
+            typer.echo(f"picked {name}: {taken.candidate.topic}"
                        f" — run `sprigly tick` to harvest and generate it")
         else:
-            click.echo(f"review {taken.candidate.id}: {taken.candidate.topic}")
+            typer.echo(f"review {taken.candidate.id}: {taken.candidate.topic}")
     conn.close()
 
 
 @main.command("fit")
-@click.option("--min-sets", type=int, default=None,
-              help="Refuse to fit below this many usable choice sets.")
-@click.pass_obj
-def fit_cmd(cfg: dict, min_sets: int | None) -> None:
+def fit_cmd(ctx: typer.Context,
+            min_sets: int = typer.Option(None, "--min-sets",
+                                         help="Refuse to fit below this many usable choice sets.")
+            ) -> None:
     """Fit the scoring weights to the offerings you actually picked from."""
     from rich.console import Console
     from rich.table import Table
@@ -275,6 +333,7 @@ def fit_cmd(cfg: dict, min_sets: int | None) -> None:
     from . import fit as fitting
     from . import picker, store
 
+    cfg = ctx.obj
     console = Console()
     conn = store.connect(cfg["paths"]["db"])
     sets = fitting.choice_sets(conn)
@@ -301,21 +360,26 @@ def fit_cmd(cfg: dict, min_sets: int | None) -> None:
                       " the weight total, so there is no [scoring] block that reproduces this fit")
         return
     console.print("\n[dim]paste into the config to adopt the fit:[/dim]")
-    click.echo("[scoring]")
+    typer.echo("[scoring]")
     for k in picker.SIGNALS:
-        click.echo(f"{k} = {fitted[k]:.3f}")
+        typer.echo(f"{k} = {fitted[k]:.3f}")
 
 
 @main.command()
-@click.option("--track", type=int, help="Decompose this track instead of prospecting.")
-@click.option("-n", type=int, help="How many lessons to ask for.")
-@click.option("--lang", help="Language for the generated material, e.g. de. Default from config.")
-@click.option("--dry-run", is_flag=True, help="Print the prompt without calling the agent.")
-@click.pass_obj
-def curate(cfg: dict, track: int | None, n: int | None, lang: str | None, dry_run: bool) -> None:
+def curate(ctx: typer.Context,
+           track: int = typer.Option(None, "--track",
+                                     help="Decompose this track instead of prospecting."),
+           n: int = typer.Option(None, "-n", help="How many lessons to ask for."),
+           lang: str = typer.Option(None, "--lang",
+                                    help="Language for the generated material, e.g. de."
+                                         " Default from config."),
+           dry_run: bool = typer.Option(False, "--dry-run",
+                                        help="Print the prompt without calling the agent.")
+           ) -> None:
     """Ask the agent for candidate lessons."""
     from . import curator, store
 
+    cfg = ctx.obj
     conn = store.connect(cfg["paths"]["db"])
     if lang:
         cfg = {**cfg, "lesson": {**cfg["lesson"], "default_language": lang}}
@@ -323,8 +387,8 @@ def curate(cfg: dict, track: int | None, n: int | None, lang: str | None, dry_ru
         prompt, role, _ = curator.build_prompt(conn, cfg, track, n)
         backend = cfg["agent"]["backend"]
         model = cfg["agent"]["models"].get(backend, {}).get(role, "?")
-        click.echo(f"# backend={backend} role={role} model={model}\n")
-        click.echo(prompt)
+        typer.echo(f"# backend={backend} role={role} model={model}\n")
+        typer.echo(prompt)
     else:
         from rich.console import Console
         from rich.table import Table
@@ -354,7 +418,7 @@ def curate(cfg: dict, track: int | None, n: int | None, lang: str | None, dry_ru
                     f"[yellow]retry {attempt}[/yellow] [dim]{err[:60]}[/dim]"),
                 report=say)
         except curator.CuratorError as err:
-            raise click.ClickException(str(err))
+            raise _fail(str(err))
         finally:
             status.stop()
 
@@ -375,7 +439,7 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
 
     row = conn.execute("SELECT * FROM lesson WHERE id=?", (lesson_id,)).fetchone()
     if not row:
-        raise click.ClickException(f"no lesson {lesson_id}")
+        raise _fail(f"no lesson {lesson_id}")
 
     console.print(f"[bold]{row['slug'] or row['id']}[/bold]  {row['topic']}"
                   f"  [cyan]{row['state']}[/cyan]  [dim]#{row['id']}[/dim]")
@@ -435,14 +499,18 @@ def _show_lesson(conn, cfg: dict, console, lesson_id: int) -> None:
         console.print(f"[dim]jobs[/dim] {row['job_ref']}")
 
 
+class Stage(str, Enum):
+    harvest = "harvest"
+    upload = "upload"
+    freshen = "freshen"
+
+
 @main.command()
-@click.argument("lesson_ref", metavar="LESSON")
-@click.option("--from", "stage", type=click.Choice(["harvest", "upload", "freshen"]),
-              default="harvest",
-              show_default=True, help="Which phase to run again.")
-@click.option("--lang", help="Regenerate in this language, e.g. de.")
-@click.pass_obj
-def redo(cfg: dict, lesson_ref: str, stage: str, lang: str | None) -> None:
+def redo(ctx: typer.Context,
+         lesson_ref: str = typer.Argument(..., metavar="LESSON"),
+         stage: Stage = typer.Option(Stage.harvest, "--from", help="Which phase to run again."),
+         lang: str = typer.Option(None, "--lang",
+                                  help="Regenerate in this language, e.g. de.")) -> None:
     """Rewind a lesson so the next tick re-runs a phase.
 
     `--from harvest` throws away its sources and brief and searches again. `--from upload` keeps the
@@ -453,26 +521,27 @@ def redo(cfg: dict, lesson_ref: str, stage: str, lang: str | None) -> None:
 
     from . import store, tick as ticker
 
+    cfg = ctx.obj
     conn = store.connect(cfg["paths"]["db"])
     _echo_warnings(Console())
+    lesson_id = _ref(conn, lesson_ref)
     try:
-        state = ticker.redo(conn, cfg, lesson_id, stage)
+        state = ticker.redo(conn, cfg, lesson_id, stage.value)
     except ValueError as err:
-        raise click.ClickException(str(err))
+        raise _fail(str(err))
     if lang:
         conn.execute("UPDATE lesson SET language=? WHERE id=?", (lang, lesson_id))
-        click.echo(f"language set to {lang}")
-    _, discarded = ticker.REDO_STAGES[stage]
-    click.echo(f"lesson {lesson_id} rewound to {state}; discarded {discarded}")
-    click.echo(f"run `sprigly tick --lesson {lesson_id}` to run that phase again")
+        typer.echo(f"language set to {lang}")
+    _, discarded = ticker.REDO_STAGES[stage.value]
+    typer.echo(f"lesson {lesson_id} rewound to {state}; discarded {discarded}")
+    typer.echo(f"run `sprigly tick --lesson {lesson_id}` to run that phase again")
     conn.close()
 
 
 @main.command()
-@click.argument("lesson_ref", metavar="LESSON")
-@click.argument("question", nargs=-1, required=True)
-@click.pass_obj
-def ask(cfg: dict, lesson_ref: str, question: tuple[str, ...]) -> None:
+def ask(ctx: typer.Context,
+        lesson_ref: str = typer.Argument(..., metavar="LESSON"),
+        question: list[str] = typer.Argument(..., metavar="QUESTION...")) -> None:
     """Ask a question about a lesson, answered from its own sources.
 
     Notebooks are deleted once their artifacts are downloaded, so the first question about an older
@@ -484,6 +553,7 @@ def ask(cfg: dict, lesson_ref: str, question: tuple[str, ...]) -> None:
 
     from . import bridge, store
 
+    cfg = ctx.obj
     console = Console()
     _echo_warnings(console)
     conn = store.connect(cfg["paths"]["db"])
@@ -496,7 +566,7 @@ def ask(cfg: dict, lesson_ref: str, question: tuple[str, ...]) -> None:
             "SELECT s.local_path, s.url FROM source s JOIN lesson_source ls ON ls.source_id=s.id"
             " WHERE ls.lesson_id=?", (lesson_id,)).fetchall()
         if not srcs:
-            raise click.ClickException(f"lesson {lesson_id} has no sources to answer from")
+            raise _fail(f"lesson {lesson_id} has no sources to answer from")
         with console.status("[dim]rebuilding the notebook from its sources[/dim]", spinner="dots"):
             notebook = bridge.upload_only(
                 row["topic"],
@@ -520,9 +590,9 @@ def _ref(conn, ref: str, table: str = "lesson") -> int:
     try:
         return refs.resolve(conn, ref, table)
     except refs.Ambiguous as err:
-        raise click.ClickException(str(err)) from None
+        raise _fail(str(err)) from None
     except LookupError as err:
-        raise click.ClickException(str(err)) from None
+        raise _fail(str(err)) from None
 
 
 def _mark_consumed(conn, lesson_id: int, via: str) -> bool:
@@ -531,7 +601,7 @@ def _mark_consumed(conn, lesson_id: int, via: str) -> bool:
 
     row = conn.execute("SELECT state FROM lesson WHERE id=?", (lesson_id,)).fetchone()
     if not row:
-        raise click.ClickException(f"no lesson {lesson_id}")
+        raise _fail(f"no lesson {lesson_id}")
     store.log_event(conn, "consumed", lesson_id, json.dumps({"via": via}))
     if row["state"] == "ready":
         conn.execute("UPDATE lesson SET state='consumed', updated_at=? WHERE id=?",
@@ -541,11 +611,11 @@ def _mark_consumed(conn, lesson_id: int, via: str) -> bool:
 
 
 @main.command()
-@click.argument("lesson_ref", metavar="LESSON")
-@click.option("--kind", default="audio", show_default=True,
-              help="Which artifact to open: audio, video, slides, quiz.")
-@click.pass_obj
-def play(cfg: dict, lesson_ref: str, kind: str) -> None:
+def play(ctx: typer.Context,
+         lesson_ref: str = typer.Argument(..., metavar="LESSON"),
+         kind: str = typer.Option("audio", "--kind",
+                                  help="Which artifact to open: audio, video, slides, quiz.")
+         ) -> None:
     """Open a lesson's artifact and record that you consumed it.
 
     This is the machine-side counterpart of deleting the file on the phone. Opening is taken as
@@ -556,6 +626,7 @@ def play(cfg: dict, lesson_ref: str, kind: str) -> None:
 
     from . import store
 
+    cfg = ctx.obj
     conn = store.connect(cfg["paths"]["db"])
     lesson_id = _ref(conn, lesson_ref)
     art = conn.execute("SELECT path FROM artifact WHERE lesson_id=? AND kind=?",
@@ -563,38 +634,40 @@ def play(cfg: dict, lesson_ref: str, kind: str) -> None:
     if not art:
         have = [r[0] for r in conn.execute(
             "SELECT kind FROM artifact WHERE lesson_id=?", (lesson_id,))]
-        raise click.ClickException(
+        raise _fail(
             f"lesson {lesson_id} has no {kind}" + (f"; it has {', '.join(have)}" if have else ""))
     path = Path(art["path"])
     if not path.exists():
-        raise click.ClickException(f"{path} is missing — try `sprigly redo {lesson_id} --from upload`")
+        raise _fail(f"{path} is missing — try `sprigly redo {lesson_id} --from upload`")
 
     opener = shutil.which("xdg-open") or shutil.which("open")
     if opener:
         subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        click.echo(f"opened {path}")
+        typer.echo(f"opened {path}")
     else:
-        click.echo(str(path))
+        typer.echo(str(path))
     if _mark_consumed(conn, lesson_id, f"play:{kind}"):
-        click.echo(f"lesson {lesson_id} marked consumed — `sprigly done {lesson_id}` to rate it")
+        typer.echo(f"lesson {lesson_id} marked consumed — `sprigly done {lesson_id}` to rate it")
     conn.close()
 
 
 @main.command()
-@click.argument("lesson_ref", metavar="LESSON")
-@click.option("--rating", type=click.IntRange(1, 5), help="How useful it was, 1 to 5.")
-@click.option("--note", default="", help="Anything worth remembering about it.")
-@click.pass_obj
-def done(cfg: dict, lesson_ref: str, rating: int | None, note: str) -> None:
+def done(ctx: typer.Context,
+         lesson_ref: str = typer.Argument(..., metavar="LESSON"),
+         rating: int = typer.Option(None, "--rating", min=1, max=5,
+                                    help="How useful it was, 1 to 5."),
+         note: str = typer.Option("", "--note",
+                                  help="Anything worth remembering about it.")) -> None:
     """Record what you thought of a lesson, and mark it consumed if it was not already."""
     from . import store
 
+    cfg = ctx.obj
     conn = store.connect(cfg["paths"]["db"])
     lesson_id = _ref(conn, lesson_ref)
     _mark_consumed(conn, lesson_id, "done")
     store.log_event(conn, "rated", lesson_id,
                     json.dumps({"rating": rating, "note": note.strip() or None}))
-    click.echo(f"recorded for lesson {lesson_id}"
+    typer.echo(f"recorded for lesson {lesson_id}"
                + (f": rating {rating}" if rating else "")
                + (f" — {note.strip()}" if note.strip() else ""))
     conn.close()
@@ -612,9 +685,9 @@ def _drill(conn, console, cards, cfg) -> int:
     graded = 0
     for i, card in enumerate(cards, 1):
         console.print(Panel(card["front"], title=f"{i}/{len(cards)}", border_style="cyan"))
-        click.prompt("press enter to reveal", default="", show_default=False, prompt_suffix="")
+        typer.prompt("press enter to reveal", default="", show_default=False, prompt_suffix="")
         console.print(Panel(card["back"], border_style="green"))
-        choice = click.prompt("  1 again  2 hard  3 good  4 easy  (q to stop)",
+        choice = typer.prompt("  1 again  2 hard  3 good  4 easy  (q to stop)",
                               default="3", show_default=False)
         if choice.strip().lower().startswith("q"):
             break
@@ -626,9 +699,8 @@ def _drill(conn, console, cards, cfg) -> int:
 
 
 @main.command()
-@click.argument("lesson_ref", metavar="LESSON")
-@click.pass_obj
-def quiz(cfg: dict, lesson_ref: str) -> None:
+def quiz(ctx: typer.Context,
+         lesson_ref: str = typer.Argument(..., metavar="LESSON")) -> None:
     """Work through a lesson's questions and schedule them for review.
 
     The questions come from NotebookLM, generated from the same sources as the lesson. Grading is
@@ -638,6 +710,7 @@ def quiz(cfg: dict, lesson_ref: str) -> None:
 
     from . import review, store
 
+    cfg = ctx.obj
     console = Console()
     conn = store.connect(cfg["paths"]["db"])
     lesson_id = _ref(conn, lesson_ref)
@@ -647,7 +720,7 @@ def quiz(cfg: dict, lesson_ref: str) -> None:
     cards = conn.execute("SELECT * FROM card WHERE lesson_id=? ORDER BY id",
                          (lesson_id,)).fetchall()
     if not cards:
-        raise click.ClickException(
+        raise _fail(
             f"lesson {lesson_id} has no questions — is 'quiz' in bridge.artifacts, and has it "
             f"finished generating? `sprigly status {lesson_id}` shows what arrived")
 
@@ -659,14 +732,14 @@ def quiz(cfg: dict, lesson_ref: str) -> None:
 
 
 @main.command("review")
-@click.option("--limit", type=int, default=20, show_default=True, help="Most cards to drill.")
-@click.pass_obj
-def review_due(cfg: dict, limit: int) -> None:
+def review_due(ctx: typer.Context,
+               limit: int = typer.Option(20, "--limit", help="Most cards to drill.")) -> None:
     """Drill every card that has come due, across all lessons."""
     from rich.console import Console
 
     from . import review, store
 
+    cfg = ctx.obj
     console = Console()
     conn = store.connect(cfg["paths"]["db"])
     cards = review.due(conn)[:limit]
@@ -681,16 +754,19 @@ def review_due(cfg: dict, limit: int) -> None:
 
 
 @main.command()
-@click.argument("goal", required=False)
-@click.option("--depth", type=click.IntRange(1, 5), help="How fine-grained the lessons should be.")
-@click.option("--lang", help="Language for this track's material.")
-@click.option("--only", is_flag=True, help="Offer nothing outside the active tracks.")
-@click.option("--shared", is_flag=True, help="Undo --only.")
-@click.option("--min-evidence", help="peer-reviewed, preprint, institutional, practitioner.")
-@click.option("--off", is_flag=True, help="Deactivate: the named track, or all of them.")
-@click.pass_obj
-def focus(cfg: dict, goal: str | None, depth: int | None, lang: str | None, only: bool,
-          shared: bool, min_evidence: str | None, off: bool) -> None:
+def focus(ctx: typer.Context,
+          goal: str = typer.Argument(None),
+          depth: int = typer.Option(None, "--depth", min=1, max=5,
+                                    help="How fine-grained the lessons should be."),
+          lang: str = typer.Option(None, "--lang", help="Language for this track's material."),
+          only: bool = typer.Option(False, "--only",
+                                    help="Offer nothing outside the active tracks."),
+          shared: bool = typer.Option(False, "--shared", help="Undo --only."),
+          min_evidence: str = typer.Option(None, "--min-evidence",
+                                           help="peer-reviewed, preprint, institutional,"
+                                                " practitioner."),
+          off: bool = typer.Option(False, "--off",
+                                   help="Deactivate: the named track, or all of them.")) -> None:
     """Activate a track, re-tune it, or show what is active.
 
     Several tracks may be active at once — parallel interests are the normal case, and the picker's
@@ -702,16 +778,17 @@ def focus(cfg: dict, goal: str | None, depth: int | None, lang: str | None, only
 
     from . import store
 
+    cfg = ctx.obj
     console = Console()
     conn = store.connect(cfg["paths"]["db"])
 
     if off:
         if goal:
             n = conn.execute("UPDATE track SET active=0 WHERE goal=?", (goal,)).rowcount
-            click.echo(f"deactivated {n} track(s) matching {goal!r}")
+            typer.echo(f"deactivated {n} track(s) matching {goal!r}")
         else:
             conn.execute("UPDATE track SET active=0")
-            click.echo("all tracks deactivated")
+            typer.echo("all tracks deactivated")
     elif goal:
         row = conn.execute("SELECT id FROM track WHERE goal=?", (goal,)).fetchone()
         if row:
@@ -724,13 +801,13 @@ def focus(cfg: dict, goal: str | None, depth: int | None, lang: str | None, only
                 (goal, depth or cfg["lesson"]["default_depth"],
                  lang or cfg["lesson"]["default_language"],
                  min_evidence or cfg["sources"]["default_min_evidence"])).lastrowid
-            click.echo(f"track {tid}: {goal}")
+            typer.echo(f"track {tid}: {goal}")
         _retune(conn, tid, depth, lang, only, shared, min_evidence)
     else:
         targets = [r["id"] for r in conn.execute("SELECT id FROM track WHERE active=1")]
         if any(v is not None and v is not False for v in (depth, lang, min_evidence)) or only or shared:
             if not targets:
-                raise click.ClickException("no active track to re-tune — name one")
+                raise _fail("no active track to re-tune — name one")
             for tid in targets:
                 _retune(conn, tid, depth, lang, only, shared, min_evidence)
 
@@ -764,7 +841,7 @@ def _retune(conn, track_id: int, depth, lang, only, shared, min_evidence) -> Non
             conn.execute("UPDATE lesson SET state='expired' WHERE id=?", (r["id"],))
             store.log_event(conn, "expired", r["id"], '{"why": "depth changed"}')
         if stale:
-            click.echo(f"depth {depth}; dropped {len(stale)} pending proposal(s) —"
+            typer.echo(f"depth {depth}; dropped {len(stale)} pending proposal(s) —"
                        f" run `sprigly curate --track {track_id}` to redecompose")
     if lang:
         conn.execute("UPDATE track SET language=? WHERE id=?", (lang, track_id))
@@ -777,15 +854,15 @@ def _retune(conn, track_id: int, depth, lang, only, shared, min_evidence) -> Non
 
 
 @main.command()
-@click.argument("lesson_ref", metavar="LESSON")
-@click.option("-n", type=int, help="How many children to ask for.")
-@click.pass_obj
-def deeper(cfg: dict, lesson_ref: str, n: int | None) -> None:
+def deeper(ctx: typer.Context,
+           lesson_ref: str = typer.Argument(..., metavar="LESSON"),
+           n: int = typer.Option(None, "-n", help="How many children to ask for.")) -> None:
     """Split a lesson into finer children, one depth level down."""
     from rich.console import Console
 
     from . import curator, store
 
+    cfg = ctx.obj
     console = Console()
     _echo_warnings(console)
     conn = store.connect(cfg["paths"]["db"])
@@ -800,7 +877,7 @@ def deeper(cfg: dict, lesson_ref: str, n: int | None) -> None:
     try:
         ids = curator.deepen(conn, cfg, lesson_id, n, report=say)
     except curator.CuratorError as err:
-        raise click.ClickException(str(err))
+        raise _fail(str(err))
     finally:
         status.stop()
     console.print(f"[green]✓[/green] {len(ids)} finer lessons under {lesson_id}"
@@ -809,9 +886,10 @@ def deeper(cfg: dict, lesson_ref: str, n: int | None) -> None:
 
 
 @main.command()
-@click.option("--prune", is_flag=True, help="Offer unused notebooks for deletion, one at a time.")
-@click.pass_obj
-def notebooks(cfg: dict, prune: bool) -> None:
+def notebooks(ctx: typer.Context,
+              prune: bool = typer.Option(False, "--prune",
+                                         help="Offer unused notebooks for deletion, one at a"
+                                              " time.")) -> None:
     """List the notebooks on your NotebookLM account and which lesson uses each.
 
     Sprigly never deletes a notebook on its own. Generating a lesson leaves one behind, and a redo
@@ -822,6 +900,7 @@ def notebooks(cfg: dict, prune: bool) -> None:
 
     from . import bridge, store
 
+    cfg = ctx.obj
     console = Console()
     conn = store.connect(cfg["paths"]["db"])
     used = {r["notebook_id"]: r["id"] for r in conn.execute(
@@ -868,9 +947,9 @@ def notebooks(cfg: dict, prune: bool) -> None:
 
     for nb in unused:
         label = f"{nb['title'][:48] or '(untitled)'} — {nb['sources']} sources"
-        if click.confirm(f"delete {nb['id'][:8]}  {label}?", default=False):
+        if typer.confirm(f"delete {nb['id'][:8]}  {label}?", default=False):
             bridge.delete(nb["id"], cfg)
-            click.echo(f"  deleted {nb['id'][:8]}")
+            typer.echo(f"  deleted {nb['id'][:8]}")
     conn.close()
 
 
@@ -883,10 +962,10 @@ def _selfcheck() -> None:
     """
     import tempfile
 
-    from click.testing import CliRunner
+    from typer.testing import CliRunner
 
     runner = CliRunner()
-    commands = sorted(main.commands)
+    commands = sorted(typer.main.get_command(main).commands)
     assert {"config", "curate", "next", "tick", "status", "quiz", "review", "ask", "play",
             "done", "redo", "deeper", "focus", "notebooks", "fit"} <= set(commands), commands
 
@@ -908,10 +987,42 @@ def _selfcheck() -> None:
         assert parsed["bridge"]["artifacts"] == ["audio", "video", "quiz"]
         assert parsed["scoring"]["prereq"] == 0.25
         assert "paths" not in parsed, "resolved paths are shown as comments, not as settings"
+        assert runner.invoke(main, ["config", "show"], env=env).output == printed, \
+            "bare `config` and `config show` print the same thing"
+
+        # `config edit` writes through the editor, and refuses to leave the file unparseable.
+        import stat
+
+        scratch = Path(td) / "sprigly"
+        editor = Path(td) / "editor.sh"
+        editor.write_text('#!/bin/sh\nprintf "[lesson]\\nbudget_minutes = 45\\n" >> "$1"\n')
+        editor.chmod(editor.stat().st_mode | stat.S_IEXEC)
+        env_edit = {**env, "EDITOR": str(editor)}
+        assert runner.invoke(main, ["config", "edit"], env=env_edit).exit_code == 0
+        assert "budget_minutes = 45" in (scratch / "config.toml").read_text()
+
+        broken = Path(td) / "broken.sh"
+        broken.write_text('#!/bin/sh\necho "not toml [[[" >> "$1"\n')
+        broken.chmod(broken.stat().st_mode | stat.S_IEXEC)
+        result = runner.invoke(main, ["config", "edit"], env={**env, "EDITOR": str(broken)})
+        assert result.exit_code != 0 and "not valid TOML" in result.output, result.output
+        # And an already-broken file must not lock the user out of the command that repairs it.
+        repair = Path(td) / "repair.sh"
+        repair.write_text('#!/bin/sh\nprintf "[lesson]\\nbudget_minutes = 45\\n" > "$1"\n')
+        repair.chmod(repair.stat().st_mode | stat.S_IEXEC)
+        result = runner.invoke(main, ["config", "edit"], env={**env, "EDITOR": str(repair)})
+        assert result.exit_code == 0, result.output
+        (scratch / "config.toml").unlink()
 
         # An unknown reference is a message, not a traceback.
         result = runner.invoke(main, ["status", "nothing-like-this"], env=env)
         assert result.exit_code != 0 and "no lesson" in result.output, result.output
+
+        # A command whose body only `--help` ever touched can carry a NameError for months, which
+        # is how `redo` lost its reference resolution. Run one that takes a lesson for real.
+        result = runner.invoke(main, ["redo", "nothing-like-this"], env=env)
+        assert result.exit_code != 0 and "no lesson" in result.output, \
+            result.exception or result.output
 
         # What `next` writes must be what the fit reads back: the choice sets live only in these
         # payloads, and a renamed key would lose the training data silently.

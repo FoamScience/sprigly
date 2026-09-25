@@ -51,6 +51,12 @@ PUBLISHER_HOSTS = ("link.springer.com", "sciencedirect.com", "onlinelibrary.wile
                    "dl.acm.org", "cambridge.org", "oup.com", "sagepub.com")
 
 
+def _pdf_rank(url: str, repository: bool) -> int:
+    """Try order: a repository copy, then anything else, then the publisher's own link last."""
+    publisher = any(p in url for p in PUBLISHER_HOSTS)
+    return 0 if repository and not publisher else (2 if publisher else 1)
+
+
 def _pdf_candidates(w: dict) -> list[str]:
     """Distinct OA pdf links, repositories before publishers."""
     seen: dict[str, int] = {}
@@ -58,10 +64,57 @@ def _pdf_candidates(w: dict) -> list[str]:
         url = loc.get("pdf_url")
         if not url or not loc.get("is_oa") or url in seen:
             continue
-        host = (loc.get("source") or {}).get("type") == "repository"
-        publisher = any(p in url for p in PUBLISHER_HOSTS)
-        seen[url] = 0 if host and not publisher else (2 if publisher else 1)
+        seen[url] = _pdf_rank(url, (loc.get("source") or {}).get("type") == "repository")
     return sorted(seen, key=seen.get)
+
+
+UNPAYWALL_URL = "https://api.unpaywall.org/v2/"
+S2_URL = "https://api.semanticscholar.org/graph/v1/paper/"
+
+
+def oa_fallbacks(w: Work, mailto: str | None = None, timeout: float = 15.0) -> list[str]:
+    """OA pdf locations OpenAlex did not carry, for a work whose own links all failed.
+
+    OpenAlex is one index's view of where a paper is free, and it is often a publisher link that
+    answers with a bot challenge. Unpaywall and Semantic Scholar keep their own location sets, and
+    both are keyed by the DOI already in hand, so a repository copy OpenAlex missed usually costs
+    one request to find.
+
+    Both are best-effort: no DOI, no configured address, or either index being down leaves the
+    caller exactly where it was.
+    """
+    if not w.doi:
+        return []
+    import httpx
+
+    known = set(w.pdf_urls) | ({w.pdf_url} if w.pdf_url else set())
+    ranked: dict[str, int] = {}
+
+    def add(url: str | None, repository: bool) -> None:
+        if url and url not in known and url not in ranked:
+            ranked[url] = _pdf_rank(url, repository)
+
+    # Unpaywall requires an address on every call, so it is only reachable once the user has
+    # decided to identify themselves. Without one this degrades to Semantic Scholar alone.
+    if mailto:
+        try:
+            r = httpx.get(f"{UNPAYWALL_URL}{w.doi}", params={"email": mailto}, timeout=timeout,
+                          follow_redirects=True)
+            r.raise_for_status()
+            for loc in r.json().get("oa_locations") or []:
+                add(loc.get("url_for_pdf"), loc.get("host_type") == "repository")
+        except Exception as err:
+            log.info("unpaywall had nothing for %s: %s", w.doi, err)
+
+    try:
+        r = httpx.get(f"{S2_URL}DOI:{w.doi}", params={"fields": "openAccessPdf"}, timeout=timeout,
+                      follow_redirects=True)
+        r.raise_for_status()
+        add(((r.json().get("openAccessPdf")) or {}).get("url"), False)
+    except Exception as err:
+        log.info("semantic scholar had nothing for %s: %s", w.doi, err)
+
+    return sorted(ranked, key=ranked.get)
 
 
 def _openalex_work(w: dict) -> Work:
@@ -266,6 +319,63 @@ def _selfcheck() -> None:
     assert a.key == b.key, "doi comparison is case-insensitive"
 
     assert "article" in READABLE_TYPES and "peer-review" not in READABLE_TYPES
+
+    # The fallback lookups. Stubbed, because what breaks here is the shape each index answers in,
+    # not the HTTP call — and a live check would make the selfcheck depend on two services.
+    import httpx
+
+    answers = {
+        UNPAYWALL_URL: {"oa_locations": [
+            {"url_for_pdf": "https://link.springer.com/content/pdf/y.pdf", "host_type": "publisher"},
+            {"url_for_pdf": "https://repo.example.edu/y.pdf", "host_type": "repository"},
+            {"url_for_pdf": None, "host_type": "repository"},
+        ]},
+        S2_URL: {"openAccessPdf": {"url": "https://s2.example.org/y.pdf"}},
+    }
+    calls: list[str] = []
+
+    class Reply:
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    def fake_get(url, **kw):
+        calls.append(url)
+        for prefix, body in answers.items():
+            if url.startswith(prefix):
+                return Reply(body)
+        raise AssertionError(f"unexpected request to {url}")
+
+    real_get, httpx.get = httpx.get, fake_get
+    try:
+        known = Work(title="y", url="https://example.org/y", doi="10.1/y",
+                     pdf_urls=["https://s2.example.org/y.pdf"])
+        got = oa_fallbacks(known, mailto="a@b.c")
+        assert got == ["https://repo.example.edu/y.pdf",
+                       "https://link.springer.com/content/pdf/y.pdf"], got
+        assert "https://s2.example.org/y.pdf" not in got, "a copy already tried is not offered again"
+
+        calls.clear()
+        assert oa_fallbacks(Work(title="y", url="u"), mailto="a@b.c") == [], \
+            "without a doi there is nothing to look up"
+        assert not calls, "and nothing is asked"
+
+        calls.clear()
+        oa_fallbacks(Work(title="y", url="u", doi="10.1/y"))
+        assert all(not c.startswith(UNPAYWALL_URL) for c in calls), \
+            "unpaywall needs an address, so it is not called without one"
+
+        httpx.get = lambda url, **kw: (_ for _ in ()).throw(RuntimeError("index down"))
+        assert oa_fallbacks(Work(title="y", url="u", doi="10.1/y"), mailto="a@b.c") == [], \
+            "an index being down leaves the caller where it was"
+    finally:
+        httpx.get = real_get
+
     print("sources selfcheck ok")
 
 
